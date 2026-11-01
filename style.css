@@ -1,0 +1,25 @@
+/*
+  Catch Rush – simple canvas game
+  Styles ensure full-screen portrait canvas centered, no scroll, no text selection.
+*/
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #111;
+  overflow: hidden; /* disable scrolling */
+  user-select: none; /* disable text selection */
+  -webkit-user-select: none;
+  -ms-user-select: none;
+}
+
+canvas {
+  display: block;
+  margin: auto;
+  /* Preserve 450:800 ratio while fitting the window */
+  width: 100vw;
+  height: calc(100vw * 800 / 450);
+  max-height: 100vh;
+  max-width: calc(100vh * 450 / 800);
+  background: #000;
+}
