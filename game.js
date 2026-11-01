@@ -15,17 +15,42 @@ const CONFIG = {
     fastLoad: true,      // parallel loading + image fallbacks + branded loader
     warmStart: true,     // easy opening: first star near basket, no early bomb
     coachMark: true,     // first-run "Drag to move" hint
-    tapAnywhereStart: true, // tapping anywhere on the menu starts the game
+    tapAnywhereStart: true, // tapping anywhere on the menu starts the game (Classic)
+    neonTheme: true,     // moonlight-blue neon look with glow
+    duel: true,          // enable Duel mode (local 2-player + phone split-screen)
+    profiles: true,      // register players, keep history + leaderboard on device
   },
 
   // ----- BRAND (theme the whole game from here) -----
+  // Neon night palette: black base, moonlight blue, electric cyan accent.
   BRAND: {
     title: "Catch Rush",                              // shown on the logo badge
     tagline: "Catch the stars. Dodge the bombs.",     // start-screen subtitle
     hook: "Beat your best in 45 seconds.",            // one-line hook on the menu
     font: "sans-serif",                               // font family for ALL text
-    main: "#ffffff",                                  // main text colour
-    accent: "#ffd23f",                                // accent / highlight colour
+    main: "#dbe7ff",                                  // main text colour (moonlight white-blue)
+    accent: "#5ad7ff",                                // accent / highlight colour (electric cyan)
+  },
+
+  // ----- THEME (neon look; used when FEATURES.neonTheme is on) -----
+  THEME: {
+    bgTop: "#060912",        // deep near-black (top of backdrop gradient)
+    bgBottom: "#0d1a33",     // moonlight-blue navy (bottom of gradient)
+    moonlight: "#8ab4f8",    // moonlight blue
+    cyan: "#5ad7ff",         // electric cyan accent
+    glow: "#5ad7ff",         // glow colour for text/sprites
+    glowBlur: 16,            // shadowBlur used for the neon glow
+    p1: "#5ad7ff",           // duel player 1 colour (cyan)
+    p2: "#c08bff",           // duel player 2 colour (violet, complements cyan)
+    grid: "rgba(138,180,248,0.08)", // faint grid lines on the backdrop
+  },
+
+  // ----- DUEL (local 2-player) -----
+  DUEL: {
+    roundSeconds: 45,        // duel round length (s)
+    lives: 5,                // lives each (shared rules, a bit more forgiving)
+    winBy: "score",          // highest score at time-up wins
+    dividerColor: "#5ad7ff", // centre divider line
   },
 
   // ----- WARM-UP (zero-friction first seconds; F2) -----
@@ -80,6 +105,75 @@ const CONFIG = {
     playButton:  "assets/play-button.png",
     restartButton: "assets/restart-button.png",
     trophy:      "assets/trophy.png",
+  },
+};
+
+/*** Device storage for profiles, score history and the leaderboard.
+ * Everything is wrapped in try/catch so the game still works if storage is
+ * blocked (e.g. some file:// contexts). Keys are namespaced; the legacy
+ * `catchRushBest` key is left untouched so existing bests survive. ***/
+const Storage = {
+  KEY: 'catchRushData_v1',
+
+  _read() {
+    try {
+      const raw = localStorage.getItem(this.KEY);
+      if (!raw) return { profiles: [], history: [], leaderboard: [] };
+      const d = JSON.parse(raw);
+      return {
+        profiles: Array.isArray(d.profiles) ? d.profiles : [],
+        history: Array.isArray(d.history) ? d.history : [],
+        leaderboard: Array.isArray(d.leaderboard) ? d.leaderboard : [],
+      };
+    } catch (e) {
+      return { profiles: [], history: [], leaderboard: [] };
+    }
+  },
+  _write(data) {
+    try { localStorage.setItem(this.KEY, JSON.stringify(data)); } catch (e) {}
+  },
+
+  getProfiles() { return this._read().profiles; },
+
+  /*** Register a player by name (deduped, case-insensitive). Returns the name. ***/
+  addProfile(name) {
+    name = (name || '').trim().slice(0, 14);
+    if (!name) return null;
+    const data = this._read();
+    if (!data.profiles.some(p => p.toLowerCase() === name.toLowerCase())) {
+      data.profiles.unshift(name);
+      data.profiles = data.profiles.slice(0, 12); // keep it tidy
+      this._write(data);
+    }
+    return name;
+  },
+
+  /*** Record one finished game for a player. mode: "classic" | "duel". ***/
+  recordGame(name, score, mode, result) {
+    if (!name) return;
+    const data = this._read();
+    data.history.unshift({
+      name, score, mode,
+      result: result || '',                 // e.g. "Win" / "Loss" in duel
+      at: Date.now(),
+    });
+    data.history = data.history.slice(0, 100); // cap history length
+
+    // Leaderboard: best score per player
+    const existing = data.leaderboard.find(e => e.name.toLowerCase() === name.toLowerCase());
+    if (existing) { if (score > existing.score) existing.score = score; }
+    else data.leaderboard.push({ name, score });
+    data.leaderboard.sort((a, b) => b.score - a.score);
+    data.leaderboard = data.leaderboard.slice(0, 10); // top 10
+    this._write(data);
+  },
+
+  getLeaderboard() { return this._read().leaderboard; },
+
+  /*** Recent games for one player (most recent first). ***/
+  getHistory(name, limit = 5) {
+    const h = this._read().history;
+    return (name ? h.filter(e => e.name.toLowerCase() === name.toLowerCase()) : h).slice(0, limit);
   },
 };
 
@@ -155,7 +249,9 @@ class Game {
     this.totalWeight = CONFIG.items.reduce((s, it) => s + it.weight, 0);
 
     // Round / screen state
-    this.state = 'start';             // "start" | "playing" | "paused" | "over"
+    // states: "start" | "menu" | "register" | "playing" | "paused" | "over"
+    //         | "duelPlaying" | "duelOver" | "leaderboard"
+    this.state = 'start';
     this.lives = CONFIG.RULES.lives;
     this.timeLeft = CONFIG.RULES.roundSeconds;
     this.overReason = '';
@@ -163,6 +259,14 @@ class Game {
     this.best = this.loadBest();
     this.newBest = false;             // did this round beat the best?
     this.elapsed = 0;                 // total seconds, for animations/pulsing
+
+    // Mode + profiles
+    this.mode = 'classic';            // "classic" | "duel"
+    this.currentPlayer = '';          // active Classic player name (optional)
+    this.nameBuffer = '';             // text being typed on the register screen
+    this.players = [];                // duel players (two basket objects)
+    this.duelWinner = null;           // index 0/1, or -1 for a tie
+    this.returnTo = 'start';          // where screens like register/leaderboard return
 
     // Effects
     this.effects = {};                // active power-ups: effect -> { timeLeft, duration, icon }
@@ -333,6 +437,10 @@ class Game {
     this.overReason = reason;
     this.newBest = this.score > this.best;
     if (this.newBest) { this.best = this.score; this.saveBest(); }
+    // Record classic history/leaderboard for the current player (if registered)
+    if (CONFIG.FEATURES.profiles && this.currentPlayer) {
+      Storage.recordGame(this.currentPlayer, this.score, 'classic', this.newBest ? 'Best' : '');
+    }
     this.sfxGameOver();
   }
 
@@ -370,13 +478,106 @@ class Game {
   /*** Back to the start screen ***/
   toMenu() {
     this.resetRound();
-    this.state = 'start';
+    this.state = CONFIG.FEATURES.duel ? 'menu' : 'start';
   }
 
-  /*** Toggle pause (only meaningful while playing/paused) ***/
+  /*** Open the mode-select menu (or go straight to classic if duel is off) ***/
+  goMenu() {
+    if (!CONFIG.FEATURES.duel) { this.startGame(); return; }
+    this.state = 'menu';
+  }
+
+  /*** Start a classic single-player round ***/
+  startClassic() {
+    this.mode = 'classic';
+    // Use the most recently registered player (if any) for history/leaderboard
+    const profs = Storage.getProfiles();
+    this.currentPlayer = profs[0] || '';
+    this.startGame();
+  }
+
+  /*** Build a duel player (basket) occupying one half of the screen.
+   * zone.top/bottom are logical Y bounds for that player's play area. ***/
+  makeDuelPlayer(index, name) {
+    const t = CONFIG.THEME;
+    return {
+      index,
+      name: name || (index === 0 ? 'P1' : 'P2'),
+      color: index === 0 ? t.p1 : t.p2,
+      score: 0,
+      lives: CONFIG.DUEL.lives,
+      x: CONFIG.CANVAS_WIDTH / 2,
+      squash: 0,
+      redFlash: 0,
+    };
+  }
+
+  /*** Start a local duel. Screen is split top/bottom; top half is player 2
+   * (rotated 180° when drawn) so two people facing each other both see their
+   * own side upright. ***/
+  startDuel() {
+    this.mode = 'duel';
+    const profs = Storage.getProfiles();
+    this.players = [
+      this.makeDuelPlayer(0, profs[0] || 'Player 1'),
+      this.makeDuelPlayer(1, profs[1] || 'Player 2'),
+    ];
+    this.fallers = [];
+    this.bursts = [];
+    this.floaters = [];
+    this.spawnTimer = 0;
+    this.timeLeft = CONFIG.DUEL.roundSeconds;
+    this.roundElapsed = 0;
+    this.shakeTime = 0;
+    this.duelWinner = null;
+    this.state = 'duelPlaying';
+  }
+
+  /*** End a duel: decide the winner, record both players' games.
+   * A knockout (one player out of lives) wins outright; otherwise highest
+   * score at time-up wins, with a tie when scores are equal. ***/
+  duelOver() {
+    const [a, b] = this.players;
+    if (a.lives <= 0 && b.lives > 0) this.duelWinner = 1;
+    else if (b.lives <= 0 && a.lives > 0) this.duelWinner = 0;
+    else if (a.score > b.score) this.duelWinner = 0;
+    else if (b.score > a.score) this.duelWinner = 1;
+    else this.duelWinner = -1; // tie
+    if (CONFIG.FEATURES.profiles) {
+      Storage.recordGame(a.name, a.score, 'duel', this.duelWinner === 0 ? 'Win' : (this.duelWinner === 1 ? 'Loss' : 'Tie'));
+      Storage.recordGame(b.name, b.score, 'duel', this.duelWinner === 1 ? 'Win' : (this.duelWinner === 0 ? 'Loss' : 'Tie'));
+    }
+    this.sfxGameOver();
+    this.state = 'duelOver';
+  }
+
+  /*** Register screen: handle one typed key. ***/
+  handleRegisterKey(e) {
+    const k = e.key;
+    if (k === 'Enter') {
+      const saved = Storage.addProfile(this.nameBuffer);
+      this.nameBuffer = '';
+      this.state = this.returnTo;
+      e.preventDefault();
+      return;
+    }
+    if (k === 'Escape') { this.nameBuffer = ''; this.state = this.returnTo; e.preventDefault(); return; }
+    if (k === 'Backspace') { this.nameBuffer = this.nameBuffer.slice(0, -1); e.preventDefault(); return; }
+    // Accept printable single characters (letters, numbers, space)
+    if (k.length === 1 && this.nameBuffer.length < 14 && /[\w ]/.test(k)) {
+      this.nameBuffer += k;
+      e.preventDefault();
+    }
+  }
+
+  /*** Toggle pause (works for classic and duel) ***/
   togglePause() {
-    if (this.state === 'playing') this.state = 'paused';
-    else if (this.state === 'paused') this.state = 'playing';
+    if (this.state === 'playing' || this.state === 'duelPlaying') {
+      this._prePauseState = this.state;
+      this.state = 'paused';
+    } else if (this.state === 'paused') {
+      this.state = this._prePauseState || 'playing';
+    }
   }
 
   /*** Pick a random item definition using spawn weights ***/
@@ -435,26 +636,52 @@ class Game {
       this.ensureAudio(); // first gesture unlocks audio
       const k = e.key;
 
+      // Register screen captures typing
+      if (this.state === 'register') { this.handleRegisterKey(e); return; }
+
       if (k === 'm' || k === 'M') { this.muted = !this.muted; e.preventDefault(); return; }
 
-      // Movement (only matters while playing)
-      if (k === 'ArrowLeft' || k === 'a' || k === 'A') { this.keysDown['left'] = true; e.preventDefault(); }
-      if (k === 'ArrowRight' || k === 'd' || k === 'D') { this.keysDown['right'] = true; e.preventDefault(); }
+      const confirmKey = (k === ' ' || k === 'Enter');
 
-      // Pause toggle
+      // Movement keys. In duel, A/D = player 1, arrows = player 2.
+      // In classic, both A/D and arrows drive the single basket.
+      if (k === 'a' || k === 'A') { this.keysDown['p1left'] = true; this.keysDown['left'] = true; e.preventDefault(); }
+      if (k === 'd' || k === 'D') { this.keysDown['p1right'] = true; this.keysDown['right'] = true; e.preventDefault(); }
+      if (k === 'ArrowLeft')  { this.keysDown['p2left'] = true;  this.keysDown['left'] = true;  e.preventDefault(); }
+      if (k === 'ArrowRight') { this.keysDown['p2right'] = true; this.keysDown['right'] = true; e.preventDefault(); }
+
+      // Pause toggle (both modes)
       if (k === 'p' || k === 'P') {
-        if (this.state === 'playing' || this.state === 'paused') { this.togglePause(); e.preventDefault(); }
+        if (this.state === 'playing' || this.state === 'duelPlaying' || this.state === 'paused') {
+          this.togglePause(); e.preventDefault();
+        }
         return;
       }
 
-      const confirmKey = (k === ' ' || k === 'Enter');
-      if (this.state === 'start' && confirmKey) { this.startGame(); e.preventDefault(); }
-      else if (this.state === 'paused' && (confirmKey || k === 'p' || k === 'P')) { this.togglePause(); e.preventDefault(); }
-      else if (this.state === 'over' && (k === 'r' || k === 'R' || confirmKey)) { this.restart(); e.preventDefault(); }
+      switch (this.state) {
+        case 'start':
+          if (confirmKey) { this.goMenu(); e.preventDefault(); }
+          break;
+        case 'paused':
+          if (confirmKey) { this.togglePause(); e.preventDefault(); }
+          break;
+        case 'over':
+          if (k === 'r' || k === 'R' || confirmKey) { this.restart(); e.preventDefault(); }
+          break;
+        case 'duelOver':
+          if (k === 'r' || k === 'R' || confirmKey) { this.startDuel(); e.preventDefault(); }
+          break;
+        case 'leaderboard':
+          if (confirmKey || k === 'Escape') { this.state = this.returnTo; e.preventDefault(); }
+          break;
+      }
     };
     const onKeyUp = e => {
-      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') this.keysDown['left'] = false;
-      if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') this.keysDown['right'] = false;
+      const k = e.key;
+      if (k === 'a' || k === 'A') { this.keysDown['p1left'] = false; this.keysDown['left'] = false; }
+      if (k === 'd' || k === 'D') { this.keysDown['p1right'] = false; this.keysDown['right'] = false; }
+      if (k === 'ArrowLeft')  { this.keysDown['p2left'] = false;  this.keysDown['left'] = false; }
+      if (k === 'ArrowRight') { this.keysDown['p2right'] = false; this.keysDown['right'] = false; }
     };
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
@@ -475,6 +702,7 @@ class Game {
       return ((clientY - rect.top) / rect.height) * CONFIG.CANVAS_HEIGHT;
     };
     const inRect = (r, px, py) => r && px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+    this.duelPointers = {}; // pointerId -> half (0/1) during a duel
     const start = e => {
       e.preventDefault();
       this.ensureAudio(); // first gesture unlocks audio
@@ -484,30 +712,65 @@ class Game {
       // Speaker icon toggles mute from anywhere
       if (inRect(this.speakerRect, px, py)) { this.muted = !this.muted; return; }
 
-      if (this.state === 'start') {
-        // Tap anywhere to start (or just the play button when the flag is off)
-        if (CONFIG.FEATURES.tapAnywhereStart || inRect(this.playRect, px, py)) this.startGame();
-        return;
+      switch (this.state) {
+        case 'start':
+          this.goMenu();
+          return;
+        case 'menu': {
+          const b = this.menuButtons || {};
+          if (inRect(b.classic, px, py)) this.startClassic();
+          else if (inRect(b.duel, px, py)) this.startDuel();
+          else if (inRect(b.leaderboard, px, py)) { this.returnTo = 'menu'; this.state = 'leaderboard'; }
+          else if (inRect(b.register, px, py)) { this.returnTo = 'menu'; this.state = 'register'; }
+          return;
+        }
+        case 'register':
+          if (inRect(this.registerBackRect, px, py)) { this.nameBuffer = ''; this.state = this.returnTo; }
+          return;
+        case 'leaderboard':
+          if (inRect(this.leaderboardBackRect, px, py)) this.state = this.returnTo;
+          return;
+        case 'paused':
+          this.togglePause();
+          return;
+        case 'over':
+          if (inRect(this.restartRect, px, py)) this.restart();
+          else if (inRect(this.menuRect, px, py)) this.toMenu();
+          return;
+        case 'duelOver':
+          if (inRect(this.duelRematchRect, px, py)) this.startDuel();
+          else if (inRect(this.duelMenuRect, px, py)) this.toMenu();
+          return;
+        case 'duelPlaying': {
+          // Each touch controls the basket in the half it belongs to.
+          const half = py >= CONFIG.CANVAS_HEIGHT / 2 ? 0 : 1;
+          this.duelPointers[e.pointerId] = half;
+          this._duelPointerMove(half, px);
+          try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+          return;
+        }
+        case 'playing':
+          this.pointerActive = true;
+          this.basketTargetX = px;
+          try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+          return;
       }
-      if (this.state === 'paused') { this.togglePause(); return; }
-      if (this.state === 'over') {
-        if (inRect(this.restartRect, px, py)) this.restart();
-        else if (inRect(this.menuRect, px, py)) this.toMenu();
-        return;
-      }
-      // Playing: begin dragging the basket toward the pointer
-      this.pointerActive = true;
-      this.basketTargetX = px;
-      canvas.setPointerCapture(e.pointerId);
     };
     const move = e => {
       e.preventDefault();
-      if (this.pointerActive && this.state === 'playing') this.basketTargetX = getPointerX(e);
+      const px = getPointerX(e), py = getPointerY(e);
+      if (this.state === 'playing' && this.pointerActive) {
+        this.basketTargetX = px;
+      } else if (this.state === 'duelPlaying') {
+        const half = this.duelPointers[e.pointerId];
+        if (half !== undefined) this._duelPointerMove(half, px);
+      }
     };
     const end = e => {
       e.preventDefault();
       this.pointerActive = false;
-      canvas.releasePointerCapture(e.pointerId);
+      delete this.duelPointers[e.pointerId];
+      try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
     };
     canvas.addEventListener('pointerdown', start);
     canvas.addEventListener('pointermove', move);
@@ -527,13 +790,18 @@ class Game {
   update(dt) {
     this.elapsed += dt; // drives pulsing/bounce animations
 
-    // Start screen: animate decorative fallers only
-    if (this.state === 'start') {
+    // Menu-like screens animate decorative fallers only
+    if (this.state === 'start' || this.state === 'menu' ||
+        this.state === 'register' || this.state === 'leaderboard') {
       for (const d of this.decor) { d.y += d.speed * dt; d.spin += dt; }
       this.decor = this.decor.filter(d => d.y - d.h / 2 <= CONFIG.CANVAS_HEIGHT);
       while (this.decor.length < 6) this.spawnDecor(false);
       return;
     }
+
+    // Duel has its own update path
+    if (this.state === 'duelPlaying') { this.updateDuel(dt); return; }
+    if (this.state === 'duelOver') return;
 
     // Basket only moves while actually playing (not paused / game over)
     if (this.state === 'playing') {
@@ -686,6 +954,127 @@ class Game {
     }
   }
 
+  /*** DUEL update: two stacked play areas sharing the 450x800 canvas.
+   * Bottom half (y: mid..H) belongs to player 1, basket near the bottom,
+   * items fall downward. Top half (y: 0..mid) belongs to player 2, basket
+   * near the top, items fall upward. Each half spawns and scores on its own. ***/
+  updateDuel(dt) {
+    const W = CONFIG.CANVAS_WIDTH, H = CONFIG.CANVAS_HEIGHT, mid = H / 2;
+    const speed = CONFIG.PLAYER.speed;
+    const halfBW = CONFIG.PLAYER.width / 2;
+
+    // Move baskets from keyboard (p1 = A/D, p2 = arrows)
+    const [p1, p2] = this.players;
+    let d1 = 0;
+    if (this.keysDown['p1left']) d1 -= 1;
+    if (this.keysDown['p1right']) d1 += 1;
+    p1.x = Math.max(halfBW, Math.min(W - halfBW, p1.x + d1 * speed * dt));
+    let d2 = 0;
+    // Player 2 sits across the table (rotated view), so flip their left/right
+    if (this.keysDown['p2left']) d2 += 1;
+    if (this.keysDown['p2right']) d2 -= 1;
+    p2.x = Math.max(halfBW, Math.min(W - halfBW, p2.x + d2 * speed * dt));
+
+    // Decay per-player feedback timers
+    for (const p of this.players) {
+      p.squash = Math.max(0, p.squash - dt);
+      p.redFlash = Math.max(0, p.redFlash - dt);
+    }
+    // Shared visual effect timers
+    this.basketSquash = Math.max(0, this.basketSquash - dt);
+    for (let i = this.bursts.length - 1; i >= 0; i--) {
+      const b = this.bursts[i]; b.t += dt;
+      if (b.t >= b.life) this.bursts.splice(i, 1);
+    }
+    for (let i = this.floaters.length - 1; i >= 0; i--) {
+      const f = this.floaters[i]; f.t += dt;
+      if (f.t >= f.life) this.floaters.splice(i, 1);
+    }
+
+    // Timer
+    this.roundElapsed += dt;
+    this.timeLeft -= dt;
+    if (this.timeLeft <= 0) { this.timeLeft = 0; this.duelOver(); return; }
+
+    // Knockout: if a player loses all lives, end early
+    if (p1.lives <= 0 || p2.lives <= 0) { this.duelOver(); return; }
+
+    // Spawn: one item into a random half every interval (no power-ups in duel
+    // to keep it a pure reflex race; stars and bombs only)
+    const progress = 1 - (this.timeLeft / CONFIG.DUEL.roundSeconds);
+    const curInterval = CONFIG.RULES.spawnIntervalStart +
+      (CONFIG.RULES.spawnIntervalEnd - CONFIG.RULES.spawnIntervalStart) * progress;
+    this.spawnTimer += dt;
+    while (this.spawnTimer >= curInterval) {
+      this.spawnTimer -= curInterval;
+      this.spawnDuelItem(0); // bottom (p1)
+      this.spawnDuelItem(1); // top (p2)
+    }
+
+    // Move + collide fallers
+    const rampMul = 1 + (CONFIG.RULES.fallSpeedRampMax - 1) * progress;
+    for (let i = this.fallers.length - 1; i >= 0; i--) {
+      const f = this.fallers[i];
+      const dirY = f.half === 0 ? 1 : -1; // p1 falls down, p2 falls up
+      f.y += f.speed * rampMul * dt * dirY;
+      if (f.def.type === 'good') f.spin += dt * 2; else f.wobblePhase += dt * 6;
+
+      const player = this.players[f.half];
+      const basketCY = f.half === 0 ? (H - 30) : 30;
+      const bHalfW = (CONFIG.PLAYER.width * 0.7) / 2;
+      const iHalfW = (f.w * 0.7) / 2, iHalfH = (f.h * 0.7) / 2;
+      const overlapX = Math.abs(f.x - player.x) < (bHalfW + iHalfW);
+      const overlapY = Math.abs(f.y - basketCY) < (iHalfH + 26);
+      if (overlapX && overlapY) {
+        if (f.def.type === 'good') {
+          player.score += f.def.points;
+          this.spawnBurst(this.assets.sparkle, f.x, f.y, 36, 80, 0.3);
+          this.floaters.push({ x: f.x, y: f.y, text: `+${f.def.points}`, t: 0, life: 0.6, half: f.half });
+          player.squash = 0.1;
+          this.sfxCatch();
+        } else {
+          player.lives -= 1;
+          player.redFlash = 0.2;
+          this.spawnBurst(this.assets.explosion, f.x, f.y, 50, 100, 0.35);
+          this.sfxBomb();
+        }
+        this.fallers.splice(i, 1);
+        continue;
+      }
+      // Cull when it leaves that player's half
+      if (f.half === 0 && f.y - f.h / 2 > H) this.fallers.splice(i, 1);
+      else if (f.half === 1 && f.y + f.h / 2 < 0) this.fallers.splice(i, 1);
+    }
+  }
+
+  /*** Map a raw touch x to a duel basket target. Player 2's half is drawn
+   * rotated 180°, so their x is mirrored to feel natural from across. ***/
+  _duelPointerMove(half, px) {
+    if (!this.players || this.players.length < 2) return;
+    const W = CONFIG.CANVAS_WIDTH;
+    const halfBW = CONFIG.PLAYER.width / 2;
+    const x = half === 1 ? (W - px) : px; // mirror for the rotated top player
+    this.players[half].x = Math.max(halfBW, Math.min(W - halfBW, x));
+  }
+
+  /*** Spawn one star/bomb into a given half (0 = bottom/p1, 1 = top/p2). ***/
+  spawnDuelItem(half) {
+    const pool = CONFIG.items.filter(it => it.type === 'good' || it.type === 'bad');
+    // weighted pick among just good/bad
+    const tw = pool.reduce((s, it) => s + it.weight, 0);
+    let r = Math.random() * tw, def = pool[pool.length - 1];
+    for (const it of pool) { r -= it.weight; if (r <= 0) { def = it; break; } }
+    const img = this.assets.items[def.name];
+    const w = def.width;
+    const h = (img.naturalHeight / img.naturalWidth) * w;
+    const x = Math.random() * (CONFIG.CANVAS_WIDTH - w) + w / 2;
+    const speed = CONFIG.RULES.fallSpeedMin +
+      Math.random() * (CONFIG.RULES.fallSpeedMax - CONFIG.RULES.fallSpeedMin);
+    // Start just off the edge of that half's entry side
+    const y = half === 0 ? -h / 2 : CONFIG.CANVAS_HEIGHT + h / 2;
+    this.fallers.push({ def, img, w, h, x, y, speed, spin: 0, wobblePhase: Math.random() * Math.PI * 2, half });
+  }
+
   render() {
     const ctx = this.ctx;
     const w = CONFIG.CANVAS_WIDTH;
@@ -694,8 +1083,12 @@ class Game {
     ctx.clearRect(0, 0, w, h);
     if (this.loading) { this.renderLoader(ctx, w, h); return; }
 
-    // Start screen is its own layout
+    // Self-contained screens
     if (this.state === 'start') { this.renderStart(ctx, w, h); return; }
+    if (this.state === 'menu') { this.renderMenu(ctx, w, h); return; }
+    if (this.state === 'register') { this.renderRegister(ctx, w, h); return; }
+    if (this.state === 'leaderboard') { this.renderLeaderboard(ctx, w, h); return; }
+    if (this.state === 'duelPlaying' || this.state === 'duelOver') { this.renderDuel(ctx, w, h); return; }
 
     // Screen shake: offset the whole world while shakeTime is active
     ctx.save();
@@ -776,25 +1169,99 @@ class Game {
     if (this.state === 'over') this.renderGameOver(ctx, w, h);
   }
 
-  /*** Helper: cover-fill the background across the whole canvas ***/
+  /*** Helper: cover-fill the background across the whole canvas.
+   * With the neon theme, draw the image then overlay a moonlight gradient and
+   * a faint grid so the world reads as a cool neon night. ***/
   drawBackground(ctx, w, h) {
     const bg = this.assets.background;
     const scale = Math.max(w / bg.naturalWidth, h / bg.naturalHeight);
     const bgW = bg.naturalWidth * scale;
     const bgH = bg.naturalHeight * scale;
     ctx.drawImage(bg, (w - bgW) / 2, (h - bgH) / 2, bgW, bgH);
+
+    if (CONFIG.FEATURES.neonTheme) {
+      const t = CONFIG.THEME;
+      const g = ctx.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, this._hexA(t.bgTop, 0.82));
+      g.addColorStop(1, this._hexA(t.bgBottom, 0.72));
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+      // faint grid
+      ctx.strokeStyle = t.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = 0; x <= w; x += 45) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+      for (let y = 0; y <= h; y += 45) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+      ctx.stroke();
+    }
   }
 
-  /*** Outlined text using BRAND colours/font ***/
-  drawText(ctx, text, x, y, size, fill = CONFIG.BRAND.main, align = 'center') {
+  /*** Flat neon backdrop (no sprite) for menu-style screens. ***/
+  drawNeonBackdrop(ctx, w, h) {
+    const t = CONFIG.THEME;
+    if (CONFIG.FEATURES.neonTheme) {
+      const g = ctx.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, t.bgTop);
+      g.addColorStop(1, t.bgBottom);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = t.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = 0; x <= w; x += 45) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+      for (let y = 0; y <= h; y += 45) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
+
+  /*** Convert #rrggbb + alpha to an rgba() string. ***/
+  _hexA(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    return `rgba(${r},${g},${b},${a})`;
+  }
+
+  /*** Outlined text using BRAND colours/font, with a neon glow when enabled. ***/
+  drawText(ctx, text, x, y, size, fill = CONFIG.BRAND.main, align = 'center', glow = CONFIG.THEME.glow) {
+    ctx.save();
     ctx.font = `bold ${size}px ${CONFIG.BRAND.font}`;
     ctx.textAlign = align;
     ctx.textBaseline = 'middle';
+    if (CONFIG.FEATURES.neonTheme) {
+      ctx.shadowColor = glow;
+      ctx.shadowBlur = CONFIG.THEME.glowBlur;
+    }
     ctx.lineWidth = Math.max(3, size / 8);
     ctx.strokeStyle = '#000';
     ctx.fillStyle = fill;
     ctx.strokeText(text, x, y);
     ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  /*** Draw a neon rounded-rect button; returns its hitbox. ***/
+  drawButton(ctx, label, cx, cy, bw, bh, color = CONFIG.THEME.cyan) {
+    const x = cx - bw / 2, y = cy - bh / 2, r = 14;
+    ctx.save();
+    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = color; ctx.shadowBlur = CONFIG.THEME.glowBlur; }
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + bw, y, x + bw, y + bh, r);
+    ctx.arcTo(x + bw, y + bh, x, y + bh, r);
+    ctx.arcTo(x, y + bh, x, y, r);
+    ctx.arcTo(x, y, x + bw, y, r);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(10,20,40,0.85)';
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+    ctx.restore();
+    this.drawText(ctx, label, cx, cy + 1, 24, CONFIG.BRAND.main, 'center', color);
+    return { x, y, w: bw, h: bh };
   }
 
   /*** Branded loading screen: dark background, title, progress bar.
@@ -891,13 +1358,233 @@ class Game {
     this.playRect = { x: cx - baseW / 2, y: h * 0.52 - baseH / 2, w: baseW, h: baseH };
 
     // How-to-play line near the bottom (bigger, 22px)
-    const howTo = CONFIG.FEATURES.tapAnywhereStart
-      ? 'Tap anywhere to start. Catch stars, dodge bombs.'
-      : 'Move: arrows / drag. Catch stars. Dodge bombs.';
+    const howTo = CONFIG.FEATURES.duel
+      ? 'Tap anywhere to choose a mode.'
+      : (CONFIG.FEATURES.tapAnywhereStart
+          ? 'Tap anywhere to start. Catch stars, dodge bombs.'
+          : 'Move: arrows / drag. Catch stars. Dodge bombs.');
     this.drawText(ctx, howTo, cx, h - 58, 22, CONFIG.BRAND.main);
 
     // Speaker toggle still available on the menu
     this.renderSpeaker(ctx, w, h);
+  }
+
+  /*** MODE-SELECT MENU: Classic / Duel / Leaderboard / Register ***/
+  renderMenu(ctx, w, h) {
+    this.drawNeonBackdrop(ctx, w, h);
+    const cx = w / 2;
+    this.drawText(ctx, CONFIG.BRAND.title, cx, h * 0.16, 46, CONFIG.THEME.cyan);
+    this.drawText(ctx, 'Choose a mode', cx, h * 0.24, 22, CONFIG.BRAND.main);
+
+    this.menuButtons = {};
+    this.menuButtons.classic = this.drawButton(ctx, 'Classic', cx, h * 0.38, 240, 60, CONFIG.THEME.cyan);
+    if (CONFIG.FEATURES.duel) {
+      this.menuButtons.duel = this.drawButton(ctx, 'Duel (2 players)', cx, h * 0.50, 240, 60, CONFIG.THEME.p2);
+    }
+    this.menuButtons.leaderboard = this.drawButton(ctx, 'Leaderboard', cx, h * 0.62, 240, 56, CONFIG.THEME.moonlight);
+    if (CONFIG.FEATURES.profiles) {
+      this.menuButtons.register = this.drawButton(ctx, 'Register player', cx, h * 0.73, 240, 56, CONFIG.THEME.moonlight);
+    }
+
+    // Duel hint
+    this.drawText(ctx, 'Duel: P1 = A / D   •   P2 = ← / →', cx, h * 0.85, 17, CONFIG.BRAND.main);
+    this.drawText(ctx, 'On phone, sit on opposite sides.', cx, h * 0.885, 15, CONFIG.THEME.moonlight);
+
+    this.renderSpeaker(ctx, w, h);
+  }
+
+  /*** REGISTER screen: type a name, Enter to save. ***/
+  renderRegister(ctx, w, h) {
+    this.drawNeonBackdrop(ctx, w, h);
+    const cx = w / 2;
+    this.drawText(ctx, 'Register player', cx, h * 0.2, 36, CONFIG.THEME.cyan);
+    this.drawText(ctx, 'Type a name, then press Enter', cx, h * 0.28, 18, CONFIG.BRAND.main);
+
+    // Input box with a blinking caret
+    const bw = 300, bh = 60, bx = cx - bw / 2, by = h * 0.36;
+    ctx.save();
+    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = CONFIG.THEME.cyan; ctx.shadowBlur = CONFIG.THEME.glowBlur; }
+    ctx.fillStyle = 'rgba(10,20,40,0.85)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = CONFIG.THEME.cyan;
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.restore();
+    const caret = (Math.floor(this.elapsed * 2) % 2 === 0) ? '|' : '';
+    this.drawText(ctx, (this.nameBuffer || 'Enter name') + caret, cx, by + bh / 2, 26,
+      this.nameBuffer ? CONFIG.BRAND.main : 'rgba(219,231,255,0.4)');
+
+    // Existing players
+    const profs = Storage.getProfiles();
+    if (profs.length) {
+      this.drawText(ctx, 'Saved: ' + profs.slice(0, 6).join(', '), cx, by + bh + 40, 16, CONFIG.THEME.moonlight);
+    }
+
+    this.registerBackRect = this.drawButton(ctx, 'Back', cx, h * 0.8, 180, 52, CONFIG.THEME.moonlight);
+    this.renderSpeaker(ctx, w, h);
+  }
+
+  /*** LEADERBOARD screen: top scores + recent history. ***/
+  renderLeaderboard(ctx, w, h) {
+    this.drawNeonBackdrop(ctx, w, h);
+    const cx = w / 2;
+    this.drawText(ctx, 'Leaderboard', cx, h * 0.12, 40, CONFIG.THEME.cyan);
+
+    const board = Storage.getLeaderboard();
+    let y = h * 0.22;
+    if (!board.length) {
+      this.drawText(ctx, 'No scores yet. Go play!', cx, y, 20, CONFIG.BRAND.main);
+    } else {
+      board.forEach((e, i) => {
+        const col = i === 0 ? CONFIG.THEME.cyan : CONFIG.BRAND.main;
+        this.drawText(ctx, `${i + 1}. ${e.name}`, w * 0.2, y, 22, col, 'left');
+        this.drawText(ctx, `${e.score}`, w * 0.8, y, 22, col, 'right');
+        y += 36;
+      });
+    }
+
+    // Recent games
+    const recent = Storage.getHistory(null, 5);
+    if (recent.length) {
+      y += 16;
+      this.drawText(ctx, 'Recent games', cx, y, 20, CONFIG.THEME.moonlight); y += 30;
+      recent.forEach(r => {
+        const label = `${r.name} · ${r.score} · ${r.mode}${r.result ? ' · ' + r.result : ''}`;
+        this.drawText(ctx, label, cx, y, 15, CONFIG.BRAND.main); y += 24;
+      });
+    }
+
+    this.leaderboardBackRect = this.drawButton(ctx, 'Back', cx, h * 0.9, 180, 52, CONFIG.THEME.moonlight);
+    this.renderSpeaker(ctx, w, h);
+  }
+
+  /*** DUEL render: two stacked halves; top half rotated 180° for the player
+   * sitting across the table. Divider + per-player HUD + winner overlay. ***/
+  renderDuel(ctx, w, h) {
+    const mid = h / 2;
+    this.drawNeonBackdrop(ctx, w, h);
+
+    // Draw each half in its own transformed space so sprites face each player.
+    this._drawDuelHalf(ctx, 0, w, h); // bottom (upright)
+    this._drawDuelHalf(ctx, 1, w, h); // top (rotated 180)
+
+    // Centre divider with glow
+    ctx.save();
+    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = CONFIG.DUEL.dividerColor; ctx.shadowBlur = 20; }
+    ctx.strokeStyle = CONFIG.DUEL.dividerColor;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+    ctx.restore();
+
+    // Shared timer at the centre divider
+    const secs = Math.ceil(this.timeLeft);
+    this.drawText(ctx, String(secs), w / 2, mid, 30, secs <= 10 ? '#ff6b6b' : CONFIG.THEME.cyan);
+
+    if (this.state === 'duelOver') this.renderDuelOver(ctx, w, h);
+    else this.renderSpeaker(ctx, w, h);
+  }
+
+  /*** Draw one duel half: background items + basket + that player's HUD.
+   * half 0 = bottom upright; half 1 = top, rotated 180° about its centre. ***/
+  _drawDuelHalf(ctx, half, w, h) {
+    const mid = h / 2;
+    const player = this.players[half];
+    ctx.save();
+    // Clip to this half so nothing bleeds across the divider
+    if (half === 0) { ctx.beginPath(); ctx.rect(0, mid, w, mid); ctx.clip(); }
+    else {
+      ctx.beginPath(); ctx.rect(0, 0, w, mid); ctx.clip();
+      // Rotate the top half 180° around the canvas centre so it faces the
+      // opposite player. After this, we can draw in normal coordinates and it
+      // appears upside-down to us but upright to them.
+      ctx.translate(w / 2, mid / 2);
+      ctx.rotate(Math.PI);
+      ctx.translate(-w / 2, -mid / 2);
+    }
+
+    // Red flash for this player
+    if (player.redFlash > 0) {
+      ctx.fillStyle = `rgba(255,0,0,${0.4 * (player.redFlash / 0.2)})`;
+      if (half === 0) ctx.fillRect(0, mid, w, mid); else ctx.fillRect(0, 0, w, mid);
+    }
+
+    // Fallers belonging to this half
+    for (const f of this.fallers) {
+      if (f.half !== half) continue;
+      ctx.save();
+      if (f.def.type === 'good') { ctx.translate(f.x, f.y); ctx.rotate(f.spin); ctx.drawImage(f.img, -f.w / 2, -f.h / 2, f.w, f.h); }
+      else { const wob = Math.sin(f.wobblePhase) * 8; ctx.drawImage(f.img, f.x - f.w / 2 + wob, f.y - f.h / 2, f.w, f.h); }
+      ctx.restore();
+    }
+
+    // Bursts + floaters for this half
+    for (const b of this.bursts) {
+      const p = b.t / b.life, bw = b.fromW + (b.toW - b.fromW) * p;
+      const bh = (b.img.naturalHeight / b.img.naturalWidth) * bw;
+      ctx.save(); ctx.globalAlpha = Math.max(0, 1 - p);
+      ctx.drawImage(b.img, b.x - bw / 2, b.y - bh / 2, bw, bh); ctx.restore();
+    }
+    for (const f of this.floaters) {
+      if (f.half !== half) continue;
+      const p = f.t / f.life;
+      ctx.save(); ctx.globalAlpha = Math.max(0, 1 - p);
+      this.drawText(ctx, f.text, f.x, f.y - 30 * p, 22, player.color);
+      ctx.restore();
+    }
+
+    // Basket, tinted to the player's colour via a glow
+    const img = this.assets.basket;
+    const bwid = CONFIG.PLAYER.width * (1 + 0.18 * (player.squash / 0.1 || 0));
+    const bhei = (img.naturalHeight / img.naturalWidth) * bwid * (1 - 0.22 * (player.squash / 0.1 || 0));
+    const by = half === 0 ? (h - 30 - bhei) : (30);
+    ctx.save();
+    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = player.color; ctx.shadowBlur = 18; }
+    ctx.drawImage(img, player.x - bwid / 2, by, bwid, bhei);
+    ctx.restore();
+
+    // Per-player HUD: name, score, lives — near the inner (divider) edge
+    const baseY = half === 0 ? (mid + 8) : (mid - 8);
+    this.drawText(ctx, `${player.name}`, 14, baseY + 14, 20, player.color, 'left');
+    this.drawText(ctx, `Score ${player.score}`, 14, baseY + 42, 24, CONFIG.BRAND.main, 'left');
+    this.drawText(ctx, '♥'.repeat(Math.max(0, player.lives)), w - 14, baseY + 20, 22, '#ff6b8b', 'right');
+
+    ctx.restore();
+  }
+
+  /*** DUEL OVER overlay: teases the winner over the loser. ***/
+  renderDuelOver(ctx, w, h) {
+    ctx.fillStyle = 'rgba(3,6,15,0.82)';
+    ctx.fillRect(0, 0, w, h);
+    const cx = w / 2, cy = h / 2;
+    const [p1, p2] = this.players;
+
+    if (this.duelWinner === -1) {
+      this.drawText(ctx, "IT'S A TIE!", cx, cy - 140, 46, CONFIG.THEME.moonlight);
+    } else {
+      const win = this.players[this.duelWinner];
+      const lose = this.players[this.duelWinner === 0 ? 1 : 0];
+      const bounce = Math.abs(Math.sin(this.elapsed * 5)) * 8;
+      this.drawText(ctx, `${win.name} WINS!`, cx, cy - 150 - bounce, 48, win.color);
+      // Teasing line
+      const margin = win.score - lose.score;
+      const taunts = [
+        `${lose.name}, maybe next time!`,
+        `${win.name} left ${lose.name} in the dust.`,
+        `${margin} points of pure bragging rights.`,
+      ];
+      const taunt = taunts[Math.floor(this.elapsed) % taunts.length];
+      this.drawText(ctx, taunt, cx, cy - 100, 18, CONFIG.BRAND.main);
+    }
+
+    // Score comparison
+    this.drawText(ctx, `${p1.name}`, cx - 90, cy - 40, 20, p1.color);
+    this.drawText(ctx, `${p1.score}`, cx - 90, cy, 40, CONFIG.BRAND.main);
+    this.drawText(ctx, 'vs', cx, cy - 10, 22, CONFIG.THEME.moonlight);
+    this.drawText(ctx, `${p2.name}`, cx + 90, cy - 40, 20, p2.color);
+    this.drawText(ctx, `${p2.score}`, cx + 90, cy, 40, CONFIG.BRAND.main);
+
+    this.duelRematchRect = this.drawButton(ctx, 'Rematch', cx, cy + 90, 200, 58, CONFIG.THEME.cyan);
+    this.duelMenuRect = this.drawButton(ctx, 'Menu', cx, cy + 160, 160, 50, CONFIG.THEME.moonlight);
   }
 
   /*** Coach mark: a "Drag to move" hint with an animated arrow, shown on the

@@ -6,9 +6,26 @@ A simple browser game built with plain HTML, CSS, and JavaScript. No frameworks,
 
 Double-click `index.html` to open it in a browser (works from a `file://` URL, no server needed).
 
+## Modes
+
+- Classic: single-player, 45 seconds, beat your best.
+- Duel (local 2-player): share one screen or phone.
+  - Laptop: Player 1 uses A / D, Player 2 uses the arrow keys.
+  - Phone: hold the phone flat between you; the screen splits top/bottom and the
+    top half is rotated 180° so both players see their side upright. Each player
+    drags in their own half. Highest score when the timer ends wins (a knockout
+    ends it early). The winner gets teased over the loser.
+
+## Players, history and leaderboard
+
+Register names on the device (stored locally). The game keeps a per-player score
+history and a top-10 leaderboard, all saved in `localStorage` on the phone/laptop.
+No account or server needed.
+
 ## Controls
 
-- Move: Left/Right arrows or A/D, or drag with mouse/touch
+- Move (Classic): Left/Right arrows or A/D, or drag with mouse/touch
+- Move (Duel): P1 = A/D, P2 = arrows; or drag in each half on touch
 - Pause: P (also pauses when the tab loses focus)
 - Mute: M, or tap the speaker icon
 - Restart: R / Space / Enter on the game-over screen
