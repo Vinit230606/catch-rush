@@ -10,13 +10,28 @@ const CONFIG = {
   CANVAS_HEIGHT: 800,         // logical world height
   MAX_DELTA: 0.05,            // cap on frame delta (s) to avoid big jumps
 
+  // ----- FEATURES (switch enhancements on/off; false = original behaviour) -----
+  FEATURES: {
+    fastLoad: true,      // parallel loading + image fallbacks + branded loader
+    warmStart: true,     // easy opening: first star near basket, no early bomb
+    coachMark: true,     // first-run "Drag to move" hint
+    tapAnywhereStart: true, // tapping anywhere on the menu starts the game
+  },
+
   // ----- BRAND (theme the whole game from here) -----
   BRAND: {
     title: "Catch Rush",                              // shown on the logo badge
     tagline: "Catch the stars. Dodge the bombs.",     // start-screen subtitle
+    hook: "Beat your best in 45 seconds.",            // one-line hook on the menu
     font: "sans-serif",                               // font family for ALL text
     main: "#ffffff",                                  // main text colour
     accent: "#ffd23f",                                // accent / highlight colour
+  },
+
+  // ----- WARM-UP (zero-friction first seconds; F2) -----
+  WARMUP: {
+    noBombSeconds: 3,    // no bombs spawn in the first N seconds of a round
+    firstStarSeconds: 0.4, // drop the first star this soon, near the basket
   },
 
   // ----- PLAYER (the basket) -----
@@ -68,17 +83,46 @@ const CONFIG = {
   },
 };
 
-/*** Helper: load an image, return a Promise ***/
+/*** Helper: load an image, return a Promise that always resolves.
+ * On failure it logs a clear error and returns a small canvas "fallback"
+ * sprite (a soft rounded square) so one bad file never blocks the game. ***/
 function loadImage(src) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = () => {
-      console.error(`Failed to load image: ${src}`);
-      reject(new Error(`Failed to load image: ${src}`));
+      console.error(`Failed to load image: ${src} — using a fallback shape.`);
+      resolve(makeFallbackSprite());
     };
     img.src = src;
   });
+}
+
+/*** Build a generic placeholder sprite on a small canvas (no external art). ***/
+function makeFallbackSprite() {
+  const size = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  g.fillStyle = '#c8c8c8';
+  const r = 12;
+  g.beginPath();
+  g.moveTo(r, 0);
+  g.arcTo(size, 0, size, size, r);
+  g.arcTo(size, size, 0, size, r);
+  g.arcTo(0, size, 0, 0, r);
+  g.arcTo(0, 0, size, 0, r);
+  g.closePath();
+  g.fill();
+  g.strokeStyle = '#888';
+  g.lineWidth = 4;
+  g.stroke();
+  // canvas elements expose naturalWidth/Height via width/height; add shims
+  if (c.naturalWidth === undefined) {
+    Object.defineProperty(c, 'naturalWidth', { get() { return this.width; } });
+    Object.defineProperty(c, 'naturalHeight', { get() { return this.height; } });
+  }
+  return c;
 }
 
 /*** Main game object ***/
@@ -95,6 +139,9 @@ class Game {
     // Game state
     this.assets = {};
     this.loading = true;
+    this.loadProgress = 0;             // 0..1 for the branded loader bar
+    this.hasPlayed = false;            // false until the first round starts (coach mark)
+    this.coachMarkDone = false;        // hide the hint after the first catch
     this.basketX = CONFIG.CANVAS_WIDTH / 2; // logical center
     this.basketTargetX = this.basketX; // for pointer movement
     this.pointerActive = false;        // true only while pointer is held
@@ -175,26 +222,45 @@ class Game {
     this.ctx.setTransform(pixelScaleX, 0, 0, pixelScaleY, 0, 0);
   }
 
-  /*** Asset loading (all paths come from CONFIG.ASSETS / CONFIG.PLAYER / items) ***/
+  /*** Asset loading. With FEATURES.fastLoad all images load in parallel and
+   * track progress; otherwise they load sequentially (original behaviour).
+   * Either way loadImage never rejects, so a bad file can't block the game. ***/
   async loadAssets() {
     const A = CONFIG.ASSETS;
-    this.assets.background = await loadImage(A.background);
-    this.assets.basket = await loadImage(CONFIG.PLAYER.img);
-    // Load every item image declared in CONFIG.items
     this.assets.items = {};
+
+    // Build one flat list of {assign(img)} jobs so we can run them together.
+    const jobs = [];
+    jobs.push({ src: A.background, set: img => this.assets.background = img });
+    jobs.push({ src: CONFIG.PLAYER.img, set: img => this.assets.basket = img });
     for (const it of CONFIG.items) {
-      this.assets.items[it.name] = await loadImage(it.img);
+      jobs.push({ src: it.img, set: img => this.assets.items[it.name] = img });
     }
-    // HUD + effect + screen sprites
-    this.assets.heart = await loadImage(A.heart);
-    this.assets.heartEmpty = await loadImage(A.heartEmpty);
-    this.assets.clock = await loadImage(A.clock);
-    this.assets.sparkle = await loadImage(A.sparkle);
-    this.assets.explosion = await loadImage(A.explosion);
-    this.assets.logo = await loadImage(A.logo);
-    this.assets.playButton = await loadImage(A.playButton);
-    this.assets.restartButton = await loadImage(A.restartButton);
-    this.assets.trophy = await loadImage(A.trophy);
+    jobs.push({ src: A.heart, set: img => this.assets.heart = img });
+    jobs.push({ src: A.heartEmpty, set: img => this.assets.heartEmpty = img });
+    jobs.push({ src: A.clock, set: img => this.assets.clock = img });
+    jobs.push({ src: A.sparkle, set: img => this.assets.sparkle = img });
+    jobs.push({ src: A.explosion, set: img => this.assets.explosion = img });
+    jobs.push({ src: A.logo, set: img => this.assets.logo = img });
+    jobs.push({ src: A.playButton, set: img => this.assets.playButton = img });
+    jobs.push({ src: A.restartButton, set: img => this.assets.restartButton = img });
+    jobs.push({ src: A.trophy, set: img => this.assets.trophy = img });
+
+    let done = 0;
+    const total = jobs.length;
+    const run = async (job) => {
+      const img = await loadImage(job.src);
+      job.set(img);
+      done += 1;
+      this.loadProgress = done / total;
+    };
+
+    if (CONFIG.FEATURES.fastLoad) {
+      await Promise.all(jobs.map(run));   // parallel
+    } else {
+      for (const job of jobs) await run(job); // sequential (original)
+    }
+
     // Seed some decorative fallers for the start screen
     for (let i = 0; i < 6; i++) this.spawnDecor(true);
   }
@@ -287,12 +353,17 @@ class Game {
     this.bursts = [];
     this.floaters = [];
     this.basketSquash = 0;
+    this.roundElapsed = 0;            // seconds since this round began
+    this.warmFirstStarDone = false;   // warm-start first star dropped yet?
   }
 
   /*** Start a fresh round from the menu or restart; no page reload ***/
   startGame() {
     this.resetRound();
     this.state = 'playing';
+    this.hasPlayed = true;
+    // Coach mark shows only on the very first round
+    this.coachMarkDone = !CONFIG.FEATURES.coachMark;
   }
   restart() { this.startGame(); }
 
@@ -318,13 +389,28 @@ class Game {
     return CONFIG.items[CONFIG.items.length - 1];
   }
 
-  /*** Spawn one faller just above the top edge ***/
-  spawnItem() {
-    const def = this.pickItem();
+  /*** Warm-start aware item picker: during the opening no-bomb window,
+   * re-roll bombs into non-bomb items so the first seconds are gentle. ***/
+  pickItemForNow() {
+    let def = this.pickItem();
+    if (CONFIG.FEATURES.warmStart &&
+        this.roundElapsed < CONFIG.WARMUP.noBombSeconds) {
+      let guard = 0;
+      while (def.type === 'bad' && guard++ < 8) def = this.pickItem();
+    }
+    return def;
+  }
+
+  /*** Spawn one faller just above the top edge.
+   * Optional opts: { def, x } to force a specific item/position (warm start). ***/
+  spawnItem(opts = {}) {
+    const def = opts.def || this.pickItemForNow();
     const img = this.assets.items[def.name];
     const w = def.width;
     const h = (img.naturalHeight / img.naturalWidth) * w;
-    const x = Math.random() * (CONFIG.CANVAS_WIDTH - w) + w / 2; // centre x, fully inside
+    const x = (opts.x !== undefined)
+      ? Math.max(w / 2, Math.min(CONFIG.CANVAS_WIDTH - w / 2, opts.x))
+      : Math.random() * (CONFIG.CANVAS_WIDTH - w) + w / 2; // centre x, fully inside
     const speed = CONFIG.RULES.fallSpeedMin +
       Math.random() * (CONFIG.RULES.fallSpeedMax - CONFIG.RULES.fallSpeedMin);
     this.fallers.push({
@@ -399,7 +485,8 @@ class Game {
       if (inRect(this.speakerRect, px, py)) { this.muted = !this.muted; return; }
 
       if (this.state === 'start') {
-        if (inRect(this.playRect, px, py)) this.startGame();
+        // Tap anywhere to start (or just the play button when the flag is off)
+        if (CONFIG.FEATURES.tapAnywhereStart || inRect(this.playRect, px, py)) this.startGame();
         return;
       }
       if (this.state === 'paused') { this.togglePause(); return; }
@@ -448,25 +535,27 @@ class Game {
       return;
     }
 
-    // Keyboard movement
-    let dir = 0;
-    if (this.keysDown['left']) dir -= 1;
-    if (this.keysDown['right']) dir += 1;
-    if (dir !== 0) {
-      // Keyboard takes over: move directly and keep pointer target in sync
-      this.basketX += dir * CONFIG.PLAYER.speed * dt;
-      this.basketTargetX = this.basketX;
-    } else if (this.pointerActive) {
-      // Pointer smooth movement (lerp towards target) only while held down
-      const pointerDelta = this.basketTargetX - this.basketX;
-      if (Math.abs(pointerDelta) > 0.5) {
-        const lerpFactor = Math.min(1, 8 * dt); // speed multiplier
-        this.basketX += pointerDelta * lerpFactor;
+    // Basket only moves while actually playing (not paused / game over)
+    if (this.state === 'playing') {
+      let dir = 0;
+      if (this.keysDown['left']) dir -= 1;
+      if (this.keysDown['right']) dir += 1;
+      if (dir !== 0) {
+        // Keyboard takes over: move directly and keep pointer target in sync
+        this.basketX += dir * CONFIG.PLAYER.speed * dt;
+        this.basketTargetX = this.basketX;
+      } else if (this.pointerActive) {
+        // Pointer smooth movement (lerp towards target) only while held down
+        const pointerDelta = this.basketTargetX - this.basketX;
+        if (Math.abs(pointerDelta) > 0.5) {
+          const lerpFactor = Math.min(1, 8 * dt); // speed multiplier
+          this.basketX += pointerDelta * lerpFactor;
+        }
       }
+      // Clamp to canvas edges (account for half basket width)
+      const halfW = CONFIG.PLAYER.width / 2;
+      this.basketX = Math.max(halfW, Math.min(CONFIG.CANVAS_WIDTH - halfW, this.basketX));
     }
-    // Clamp to canvas edges (account for half basket width)
-    const halfW = CONFIG.PLAYER.width / 2;
-    this.basketX = Math.max(halfW, Math.min(CONFIG.CANVAS_WIDTH - halfW, this.basketX));
 
     // Countdown visual timers (always run so they finish after game over)
     if (this.redFlash > 0) this.redFlash = Math.max(0, this.redFlash - dt);
@@ -495,11 +584,21 @@ class Game {
     }
 
     // Round timer
+    this.roundElapsed += dt;
     this.timeLeft -= dt;
     if (this.timeLeft <= 0) {
       this.timeLeft = 0;
       this.gameOver("Time's up!");
       return;
+    }
+
+    // Warm start: drop the very first star right above the basket, early,
+    // so a new player gets a guaranteed easy catch within ~2 s.
+    if (CONFIG.FEATURES.warmStart && !this.warmFirstStarDone &&
+        this.roundElapsed >= CONFIG.WARMUP.firstStarSeconds) {
+      this.warmFirstStarDone = true;
+      const starDef = CONFIG.items.find(it => it.name === 'star');
+      if (starDef) { this.spawnItem({ def: starDef, x: this.basketX }); this.spawnTimer = 0; }
     }
 
     // Difficulty ramp: progress 0..1 across the round
@@ -551,6 +650,7 @@ class Game {
           this.spawnBurst(this.assets.sparkle, f.x, f.y, 40, 90, 0.35);
           this.floaters.push({ x: f.x, y: f.y, text: `+${gained}`, t: 0, life: 0.7 });
           this.basketSquash = 0.1;
+          this.coachMarkDone = true; // first catch dismisses the hint
           this.sfxCatch();
         } else if (f.def.type === 'power') {
           // Activate / refresh the effect (reusable by effect name)
@@ -592,14 +692,7 @@ class Game {
     const h = CONFIG.CANVAS_HEIGHT;
     // Clear
     ctx.clearRect(0, 0, w, h);
-    if (this.loading) {
-      ctx.fillStyle = CONFIG.BRAND.main;
-      ctx.font = `24px ${CONFIG.BRAND.font}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('Loading...', w / 2, h / 2);
-      return;
-    }
+    if (this.loading) { this.renderLoader(ctx, w, h); return; }
 
     // Start screen is its own layout
     if (this.state === 'start') { this.renderStart(ctx, w, h); return; }
@@ -678,6 +771,7 @@ class Game {
     ctx.restore();
 
     this.renderHUD(ctx, w, h);
+    if (this.state === 'playing' && CONFIG.FEATURES.coachMark) this.renderCoachMark(ctx, w, h);
     if (this.state === 'paused') this.renderPause(ctx, w, h);
     if (this.state === 'over') this.renderGameOver(ctx, w, h);
   }
@@ -701,6 +795,41 @@ class Game {
     ctx.fillStyle = fill;
     ctx.strokeText(text, x, y);
     ctx.fillText(text, x, y);
+  }
+
+  /*** Branded loading screen: dark background, title, progress bar.
+   * Falls back to plain "Loading..." when FEATURES.fastLoad is off. ***/
+  renderLoader(ctx, w, h) {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, w, h);
+
+    if (!CONFIG.FEATURES.fastLoad) {
+      this.drawText(ctx, 'Loading...', w / 2, h / 2, 24, CONFIG.BRAND.main);
+      return;
+    }
+
+    // Logo if it has loaded yet, else the title text
+    const logo = this.assets.logo;
+    const cx = w / 2;
+    if (logo) {
+      const lw = 260;
+      const lh = (logo.naturalHeight / logo.naturalWidth) * lw;
+      ctx.drawImage(logo, cx - lw / 2, h * 0.3, lw, lh);
+    }
+    this.drawText(ctx, CONFIG.BRAND.title, cx, h * 0.3 + 70, 40, CONFIG.BRAND.main);
+
+    // Progress bar
+    const barW = 240, barH = 14;
+    const barX = cx - barW / 2, barY = h * 0.56;
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillStyle = CONFIG.BRAND.accent;
+    ctx.fillRect(barX, barY, barW * this.loadProgress, barH);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(barX, barY, barW, barH);
+
+    this.drawText(ctx, `${Math.round(this.loadProgress * 100)}%`, cx, barY + 40, 20, CONFIG.BRAND.main);
   }
 
   /*** START SCREEN ***/
@@ -739,6 +868,16 @@ class Game {
     // Tagline under the badge
     this.drawText(ctx, CONFIG.BRAND.tagline, cx, logoY + logoH + 28, 22, CONFIG.BRAND.accent);
 
+    // One-line hook + Best score (gives a reason to care)
+    let infoY = logoY + logoH + 62;
+    if (CONFIG.BRAND.hook) {
+      this.drawText(ctx, CONFIG.BRAND.hook, cx, infoY, 20, CONFIG.BRAND.main);
+      infoY += 32;
+    }
+    if (this.best > 0) {
+      this.drawText(ctx, `Best: ${this.best}`, cx, infoY, 24, CONFIG.BRAND.accent);
+    }
+
     // Pulsing play button (1.0 -> 1.08)
     const pulse = 1 + 0.04 + 0.04 * Math.sin(this.elapsed * 3);
     const pb = this.assets.playButton;
@@ -751,11 +890,40 @@ class Game {
     const baseW = 120, baseH = (pb.naturalHeight / pb.naturalWidth) * baseW;
     this.playRect = { x: cx - baseW / 2, y: h * 0.52 - baseH / 2, w: baseW, h: baseH };
 
-    // How-to-play line near the bottom
-    this.drawText(ctx, 'Move: arrows / drag. Catch stars. Dodge bombs.', cx, h - 60, 18, CONFIG.BRAND.main);
+    // How-to-play line near the bottom (bigger, 22px)
+    const howTo = CONFIG.FEATURES.tapAnywhereStart
+      ? 'Tap anywhere to start. Catch stars, dodge bombs.'
+      : 'Move: arrows / drag. Catch stars. Dodge bombs.';
+    this.drawText(ctx, howTo, cx, h - 58, 22, CONFIG.BRAND.main);
 
     // Speaker toggle still available on the menu
     this.renderSpeaker(ctx, w, h);
+  }
+
+  /*** Coach mark: a "Drag to move" hint with an animated arrow, shown on the
+   * first round until the first catch. Gated by FEATURES.coachMark. ***/
+  renderCoachMark(ctx, w, h) {
+    if (this.coachMarkDone) return;
+    const cx = w / 2;
+    const y = h * 0.62;
+    const bob = Math.sin(this.elapsed * 4) * 10; // gentle left-right motion
+    this.drawText(ctx, 'Drag to move', cx, y, 26, CONFIG.BRAND.accent);
+    // Simple arrow drawn under the text, sliding side to side
+    ctx.save();
+    ctx.strokeStyle = CONFIG.BRAND.main;
+    ctx.fillStyle = CONFIG.BRAND.main;
+    ctx.lineWidth = 4;
+    const ax = cx + bob, ay = y + 34;
+    ctx.beginPath();
+    ctx.moveTo(ax - 40, ay);
+    ctx.lineTo(ax + 40, ay);
+    ctx.stroke();
+    // arrow heads both ends
+    ctx.beginPath();
+    ctx.moveTo(ax - 40, ay); ctx.lineTo(ax - 28, ay - 8); ctx.lineTo(ax - 28, ay + 8);
+    ctx.moveTo(ax + 40, ay); ctx.lineTo(ax + 28, ay - 8); ctx.lineTo(ax + 28, ay + 8);
+    ctx.fill();
+    ctx.restore();
   }
 
   /*** PAUSE overlay ***/
