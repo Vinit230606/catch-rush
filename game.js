@@ -154,6 +154,132 @@ function makeRng(seed) {
   };
 }
 
+/*** Live moonlit background. Layered, continuously animated, drawn behind
+ * every screen. Respects CONFIG.FEATURES.reducedMotion (freezes motion but
+ * still paints a rich static scene). Kept separate from gameplay/collision. ***/
+class LiveBackground {
+  constructor(w, h) {
+    this.w = w; this.h = h;
+    this.t = 0;
+    const rng = makeRng(1337);
+    // Starfield: three depth layers, each drifting at a different speed
+    this.stars = [];
+    for (let i = 0; i < 90; i++) {
+      const layer = i < 50 ? 0 : i < 75 ? 1 : 2;
+      this.stars.push({
+        x: rng() * w, y: rng() * h,
+        r: layer === 0 ? 0.7 + rng() * 0.8 : layer === 1 ? 1.0 + rng() * 1.0 : 1.4 + rng() * 1.4,
+        layer,
+        tw: rng() * Math.PI * 2,          // twinkle phase
+        twSpeed: 0.6 + rng() * 1.4,
+      });
+    }
+    // Nebula bands: soft horizontal haze blobs
+    this.bands = [];
+    for (let i = 0; i < 4; i++) {
+      this.bands.push({
+        y: h * (0.25 + 0.16 * i) + rng() * 30,
+        x: rng() * w,
+        w: 220 + rng() * 180,
+        h: 90 + rng() * 70,
+        speed: 6 + rng() * 10,
+        hue: rng(),
+      });
+    }
+    // Parallax mountain silhouette layers (back to front)
+    this.mountains = [
+      this._makeRidge(rng, h * 0.80, 70, 6),
+      this._makeRidge(rng, h * 0.86, 100, 7),
+      this._makeRidge(rng, h * 0.92, 140, 8),
+    ];
+    this.moon = { x: w * 0.72, y: h * 0.18, r: 54 };
+  }
+
+  _makeRidge(rng, baseY, amp, points) {
+    const pts = [];
+    for (let i = 0; i <= points; i++) pts.push(baseY - rng() * amp);
+    return { baseY, amp, pts };
+  }
+
+  update(dt) {
+    if (CONFIG.FEATURES.reducedMotion) return;
+    this.t += dt;
+    for (const s of this.stars) s.tw += s.twSpeed * dt;
+    for (const b of this.bands) { b.x += b.speed * dt; if (b.x - b.w > this.w) b.x = -b.w; }
+  }
+
+  /*** Paint the full scene. intensity 0..1 lifts brightness (final seconds). ***/
+  draw(ctx, w, h, theme, intensity = 0) {
+    // Vertical sky gradient
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, theme.bgTop);
+    g.addColorStop(0.6, theme.bgBottom);
+    g.addColorStop(1, '#0d1f38');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+
+    // Nebula bands (very low opacity blue/violet haze)
+    for (const b of this.bands) {
+      const bx = (b.x % (w + b.w));
+      const grad = ctx.createRadialGradient(bx, b.y, 0, bx, b.y, b.w);
+      const col = b.hue > 0.5 ? '139,223,255' : '150,130,255';
+      grad.addColorStop(0, `rgba(${col},0.10)`);
+      grad.addColorStop(1, `rgba(${col},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.ellipse(bx, b.y, b.w, b.h, 0, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Starfield with twinkle + slow drift
+    for (const s of this.stars) {
+      const drift = this.t * (4 + s.layer * 6);
+      const sx = (s.x + drift) % w;
+      const tw = 0.5 + 0.5 * Math.sin(s.tw);
+      ctx.globalAlpha = (0.3 + 0.7 * tw) * (s.layer === 0 ? 0.6 : s.layer === 1 ? 0.85 : 1);
+      ctx.fillStyle = '#ddeeff';
+      ctx.beginPath(); ctx.arc(sx, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Moon with faint rim light + slow parallax drift
+    const mx = this.moon.x + Math.sin(this.t * 0.05) * 8;
+    const my = this.moon.y + Math.cos(this.t * 0.04) * 4;
+    const mg = ctx.createRadialGradient(mx - 10, my - 10, 6, mx, my, this.moon.r);
+    mg.addColorStop(0, '#f2f7ff');
+    mg.addColorStop(0.7, '#a6c6ef');
+    mg.addColorStop(1, 'rgba(120,150,200,0.1)');
+    ctx.save();
+    ctx.shadowColor = 'rgba(139,223,255,0.5)'; ctx.shadowBlur = 40;
+    ctx.fillStyle = mg;
+    ctx.beginPath(); ctx.arc(mx, my, this.moon.r, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    // a couple of soft craters
+    ctx.fillStyle = 'rgba(120,150,200,0.25)';
+    ctx.beginPath(); ctx.arc(mx - 14, my + 6, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(mx + 16, my - 12, 6, 0, Math.PI * 2); ctx.fill();
+
+    // Parallax mountain silhouettes (back lighter, front darker)
+    const shades = ['#0a1830', '#081322', '#050c16'];
+    this.mountains.forEach((m, li) => {
+      const off = Math.sin(this.t * (0.03 + li * 0.015)) * (6 - li * 2);
+      ctx.fillStyle = shades[li];
+      ctx.beginPath();
+      ctx.moveTo(0, h);
+      const n = m.pts.length - 1;
+      for (let i = 0; i <= n; i++) {
+        const x = (i / n) * w + off;
+        ctx.lineTo(x, m.pts[i]);
+      }
+      ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+    });
+
+    // Horizon glow (brightens with intensity in the final seconds)
+    const hy = h * 0.9;
+    const hg = ctx.createLinearGradient(0, hy - 120, 0, h);
+    hg.addColorStop(0, 'rgba(139,223,255,0)');
+    hg.addColorStop(1, `rgba(139,223,255,${0.08 + 0.12 * intensity})`);
+    ctx.fillStyle = hg; ctx.fillRect(0, hy - 120, w, h - (hy - 120));
+  }
+}
+
 /*** Device storage for profiles, score history and the leaderboard.
  * Everything is wrapped in try/catch so the game still works if storage is
  * blocked (e.g. some file:// contexts). Keys are namespaced; the legacy
@@ -333,6 +459,9 @@ class Game {
 
     // Decorative fallers for the start screen
     this.decor = [];
+
+    // Live animated background (drawn behind every screen)
+    this.bg = new LiveBackground(CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
 
     // Bind input handlers
     this.bindKeyboard();
@@ -985,6 +1114,7 @@ class Game {
 
   update(dt) {
     this.elapsed += dt; // drives pulsing/bounce animations
+    if (this.bg) this.bg.update(dt); // live background advances in every state
 
     // Menu-like screens animate decorative fallers only (unless reduced motion)
     if (this.state === 'start' || this.state === 'menu' ||
@@ -1383,8 +1513,10 @@ class Game {
       ctx.translate((Math.random() * 2 - 1) * mag, (Math.random() * 2 - 1) * mag);
     }
 
-    // Draw background (cover-fill, centred)
-    this.drawBackground(ctx, w, h);
+    // Live background; horizon glow lifts in the final 10 seconds
+    const intensity = (this.state === 'playing' && this.timeLeft <= 10)
+      ? (1 - this.timeLeft / 10) : 0;
+    this.drawBackground(ctx, w, h, intensity);
     // Basket sprite – keep real aspect ratio, with a quick squash on catch
     const img = this.assets.basket;
     const baseW = CONFIG.PLAYER.width;
@@ -1455,52 +1587,63 @@ class Game {
     if (this.state === 'over') this.renderGameOver(ctx, w, h);
   }
 
-  /*** Helper: cover-fill the background across the whole canvas.
-   * With the neon theme, draw the image then overlay a moonlight gradient and
-   * a faint grid so the world reads as a cool neon night. ***/
-  drawBackground(ctx, w, h) {
-    const bg = this.assets.background;
-    const scale = Math.max(w / bg.naturalWidth, h / bg.naturalHeight);
-    const bgW = bg.naturalWidth * scale;
-    const bgH = bg.naturalHeight * scale;
-    ctx.drawImage(bg, (w - bgW) / 2, (h - bgH) / 2, bgW, bgH);
-
-    if (CONFIG.FEATURES.neonTheme) {
-      const t = CONFIG.THEME;
-      const g = ctx.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, this._hexA(t.bgTop, 0.82));
-      g.addColorStop(1, this._hexA(t.bgBottom, 0.72));
-      ctx.fillStyle = g;
+  /*** Background for GAMEPLAY screens: the live moonlit scene, then a subtle
+   * darkening wash under the play lane so falling items stay readable.
+   * intensity lifts the horizon glow in the final seconds. ***/
+  drawBackground(ctx, w, h, intensity = 0) {
+    if (CONFIG.FEATURES.neonTheme && this.bg) {
+      this.bg.draw(ctx, w, h, CONFIG.THEME, intensity);
+      // readability wash so sprites pop against the scene
+      ctx.fillStyle = 'rgba(5,10,19,0.28)';
       ctx.fillRect(0, 0, w, h);
-      // faint grid
-      ctx.strokeStyle = t.grid;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let x = 0; x <= w; x += 45) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
-      for (let y = 0; y <= h; y += 45) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
-      ctx.stroke();
+    } else {
+      const bg = this.assets.background;
+      const scale = Math.max(w / bg.naturalWidth, h / bg.naturalHeight);
+      ctx.drawImage(bg, (w - bg.naturalWidth * scale) / 2, (h - bg.naturalHeight * scale) / 2,
+        bg.naturalWidth * scale, bg.naturalHeight * scale);
     }
   }
 
-  /*** Flat neon backdrop (no sprite) for menu-style screens. ***/
+  /*** Background for MENU-style screens: the same live scene, slightly dimmed
+   * so panels and text read clearly over it. ***/
   drawNeonBackdrop(ctx, w, h) {
-    const t = CONFIG.THEME;
-    if (CONFIG.FEATURES.neonTheme) {
-      const g = ctx.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, t.bgTop);
-      g.addColorStop(1, t.bgBottom);
-      ctx.fillStyle = g;
+    if (CONFIG.FEATURES.neonTheme && this.bg) {
+      this.bg.draw(ctx, w, h, CONFIG.THEME, 0);
+      ctx.fillStyle = 'rgba(5,10,19,0.42)';
       ctx.fillRect(0, 0, w, h);
-      ctx.strokeStyle = t.grid;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let x = 0; x <= w; x += 45) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
-      for (let y = 0; y <= h; y += 45) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
-      ctx.stroke();
     } else {
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, w, h);
     }
+  }
+
+  /*** Draw a translucent panel (rounded rect) to group UI and separate it from
+   * the busy background. Returns nothing; purely visual. ***/
+  drawPanel(ctx, x, y, pw, ph, r = 18, border = CONFIG.THEME.moonlight) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + pw, y, x + pw, y + ph, r);
+    ctx.arcTo(x + pw, y + ph, x, y + ph, r);
+    ctx.arcTo(x, y + ph, x, y, r);
+    ctx.arcTo(x, y, x + pw, y, r);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(5,10,19,0.55)';
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = this._hexA(border, 0.35);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /*** Simple vertical layout cursor: start at y, advance by each row's height.
+   * Keeps text/buttons from overlapping without hand-tuned percentages. ***/
+  makeStack(startY, gap = 16) {
+    return {
+      y: startY, gap,
+      next(height) { const y = this.y + height / 2; this.y += height + this.gap; return y; },
+      space(px) { this.y += px; },
+    };
   }
 
   /*** Convert #rrggbb + alpha to an rgba() string. ***/
@@ -1630,98 +1773,92 @@ class Game {
     this.drawText(ctx, `${Math.round(this.loadProgress * 100)}%`, cx, barY + 40, 20, CONFIG.BRAND.main);
   }
 
-  /*** START SCREEN ***/
+  /*** START / LANDING screen over the live moonlit background. ***/
   renderStart(ctx, w, h) {
-    this.drawBackground(ctx, w, h);
+    this.drawNeonBackdrop(ctx, w, h);
+    const cx = w / 2, t = CONFIG.THEME;
 
-    // Decorative stars/bombs drifting behind
-    for (const d of this.decor) {
-      ctx.save();
-      ctx.globalAlpha = 0.85;
-      ctx.translate(d.x, d.y);
-      ctx.rotate(d.spin);
-      ctx.drawImage(d.img, -d.w / 2, -d.h / 2, d.w, d.h);
-      ctx.restore();
-    }
-
-    // Logo badge (340px) in the upper third with the title on it
+    // Logo badge with the brand wordmark fitted on it
     const logo = this.assets.logo;
-    const logoW = 340;
+    const logoW = 300;
     const logoH = (logo.naturalHeight / logo.naturalWidth) * logoW;
-    const logoX = (w - logoW) / 2;
-    const logoY = h * 0.14;
-    ctx.drawImage(logo, logoX, logoY, logoW, logoH);
+    const logoY = h * 0.12;
+    ctx.save();
+    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = t.moonlight; ctx.shadowBlur = 24; }
+    ctx.drawImage(logo, cx - logoW / 2, logoY, logoW, logoH);
+    ctx.restore();
 
-    // Title text fitted inside the badge
-    const cx = w / 2;
-    const titleY = logoY + logoH / 2;
-    let titleSize = 48;
+    let titleSize = 46;
     ctx.font = `bold ${titleSize}px ${CONFIG.BRAND.font}`;
-    while (ctx.measureText(CONFIG.BRAND.title).width > logoW * 0.8 && titleSize > 20) {
-      titleSize -= 2;
-      ctx.font = `bold ${titleSize}px ${CONFIG.BRAND.font}`;
+    while (ctx.measureText(CONFIG.BRAND.title).width > logoW * 0.78 && titleSize > 20) {
+      titleSize -= 2; ctx.font = `bold ${titleSize}px ${CONFIG.BRAND.font}`;
     }
-    this.drawText(ctx, CONFIG.BRAND.title, cx, titleY, titleSize, CONFIG.BRAND.main);
+    this.drawText(ctx, CONFIG.BRAND.title, cx, logoY + logoH / 2 - 8, titleSize, t.moonlight);
+    this.drawText(ctx, CONFIG.BRAND.subtitle, cx, logoY + logoH / 2 + 22, 18, t.gold);
 
-    // Tagline under the badge
-    this.drawText(ctx, CONFIG.BRAND.tagline, cx, logoY + logoH + 28, 22, CONFIG.BRAND.accent);
+    // Hook + best inside a panel so they never collide with the button
+    const s = this.makeStack(logoY + logoH + 18, 10);
+    this.drawText(ctx, CONFIG.BRAND.hook, cx, s.next(22), 20, CONFIG.BRAND.main);
+    if (this.best > 0) this.drawText(ctx, `Best  ${this.best}`, cx, s.next(24), 22, t.gold);
 
-    // One-line hook + Best score (gives a reason to care)
-    let infoY = logoY + logoH + 62;
-    if (CONFIG.BRAND.hook) {
-      this.drawText(ctx, CONFIG.BRAND.hook, cx, infoY, 20, CONFIG.BRAND.main);
-      infoY += 32;
-    }
-    if (this.best > 0) {
-      this.drawText(ctx, `Best: ${this.best}`, cx, infoY, 24, CONFIG.BRAND.accent);
-    }
-
-    // Pulsing play button (1.0 -> 1.08)
+    // Pulsing play button with a fixed hitbox
     const pulse = 1 + 0.04 + 0.04 * Math.sin(this.elapsed * 3);
     const pb = this.assets.playButton;
-    const pbW = 120 * pulse;
-    const pbH = (pb.naturalHeight / pb.naturalWidth) * pbW;
-    const pbX = cx - pbW / 2;
-    const pbY = h * 0.52 - pbH / 2;
-    ctx.drawImage(pb, pbX, pbY, pbW, pbH);
-    // Fixed hitbox (unscaled) for reliable tapping
-    const baseW = 120, baseH = (pb.naturalHeight / pb.naturalWidth) * baseW;
-    this.playRect = { x: cx - baseW / 2, y: h * 0.52 - baseH / 2, w: baseW, h: baseH };
+    const baseW = 128, baseH = (pb.naturalHeight / pb.naturalWidth) * baseW;
+    const pbW = baseW * pulse, pbH = baseH * pulse;
+    const pbCY = h * 0.6;
+    ctx.save();
+    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = t.moonlight; ctx.shadowBlur = 22; }
+    ctx.drawImage(pb, cx - pbW / 2, pbCY - pbH / 2, pbW, pbH);
+    ctx.restore();
+    this.playRect = { x: cx - baseW / 2, y: pbCY - baseH / 2, w: baseW, h: baseH };
 
-    // How-to-play line near the bottom (bigger, 22px)
+    // How-to line near the bottom
     const howTo = CONFIG.FEATURES.duel
-      ? 'Tap anywhere to choose a mode.'
-      : (CONFIG.FEATURES.tapAnywhereStart
-          ? 'Tap anywhere to start. Catch stars, dodge bombs.'
-          : 'Move: arrows / drag. Catch stars. Dodge bombs.');
-    this.drawText(ctx, howTo, cx, h - 58, 22, CONFIG.BRAND.main);
+      ? 'Tap anywhere to choose a mode'
+      : 'Tap anywhere to start · catch stars, dodge bombs';
+    this.drawText(ctx, howTo, cx, h - 54, 18, t.moonlight);
 
-    // Speaker toggle still available on the menu
     this.renderSpeaker(ctx, w, h);
   }
 
-  /*** MODE-SELECT MENU: Classic / Duel / Leaderboard / Register ***/
+  /*** MODE-SELECT MENU: Solo / Duel / Global Arena / Leaderboard / Register ***/
   renderMenu(ctx, w, h) {
     this.drawNeonBackdrop(ctx, w, h);
     const cx = w / 2;
-    this.drawText(ctx, CONFIG.BRAND.title, cx, h * 0.16, 46, CONFIG.THEME.cyan);
-    this.drawText(ctx, 'Choose a mode', cx, h * 0.24, 22, CONFIG.BRAND.main);
+    const t = CONFIG.THEME;
 
+    // Title block
+    const s = this.makeStack(h * 0.10, 6);
+    this.drawText(ctx, CONFIG.BRAND.title, cx, s.next(44), 44, t.moonlight);
+    this.drawText(ctx, CONFIG.BRAND.subtitle, cx, s.next(22), 20, t.gold);
+
+    // Button panel keeps everything grouped and evenly spaced
+    const panelW = 300;
+    const rows = 5; // solo, duel, arena, leaderboard, register
+    const rowH = 54, rowGap = 14;
+    const panelH = rows * rowH + (rows - 1) * rowGap + 48;
+    const panelY = h * 0.26;
+    this.drawPanel(ctx, cx - panelW / 2, panelY, panelW, panelH);
+
+    const b = this.makeStack(panelY + 24 + rowH / 2 - rowH / 2, rowGap);
+    b.y = panelY + 24; // top padding
     this.menuButtons = {};
-    this.menuButtons.classic = this.drawButton(ctx, 'Classic', cx, h * 0.38, 240, 60, CONFIG.THEME.cyan);
+    this.menuButtons.classic = this.drawButton(ctx, 'Solo Survival', cx, b.next(rowH), 240, rowH, t.moonlight);
     if (CONFIG.FEATURES.duel) {
-      this.menuButtons.duel = this.drawButton(ctx, 'Duel (2 players)', cx, h * 0.50, 240, 60, CONFIG.THEME.p2);
-    }
+      this.menuButtons.duel = this.drawButton(ctx, 'Local Duel', cx, b.next(rowH), 240, rowH, t.p2);
+    } else { b.next(rowH); }
     // Global Arena — honest "Coming Soon" (no real backend yet)
-    this.drawButton(ctx, 'Global Arena — Coming Soon', cx, h * 0.61, 260, 50, 'rgba(221,238,255,0.25)');
-    this.menuButtons.leaderboard = this.drawButton(ctx, 'Leaderboard', cx, h * 0.70, 240, 52, CONFIG.THEME.moonlight);
+    this.drawButton(ctx, 'Global Arena · Soon', cx, b.next(rowH), 240, rowH, 'rgba(221,238,255,0.22)');
+    this.menuButtons.leaderboard = this.drawButton(ctx, 'Leaderboard', cx, b.next(rowH), 240, rowH, t.moonlight);
     if (CONFIG.FEATURES.profiles) {
-      this.menuButtons.register = this.drawButton(ctx, 'Register player', cx, h * 0.80, 240, 52, CONFIG.THEME.moonlight);
+      this.menuButtons.register = this.drawButton(ctx, 'Register Player', cx, b.next(rowH), 240, rowH, t.moonlight);
     }
 
-    // Duel hint
-    this.drawText(ctx, 'Duel: P1 = A / D + Z   •   P2 = ← / → + X', cx, h * 0.88, 16, CONFIG.BRAND.main);
-    this.drawText(ctx, 'Laptop: side by side. Phone: top & bottom.', cx, h * 0.91, 14, CONFIG.THEME.moonlight);
+    // Controls hint, anchored to the bottom with clear spacing
+    const hint = this.makeStack(panelY + panelH + 22, 8);
+    this.drawText(ctx, 'P1: A / D + Z        P2: ← / → + X', cx, hint.next(18), 16, CONFIG.BRAND.main);
+    this.drawText(ctx, 'Laptop splits left/right · phone splits top/bottom', cx, hint.next(16), 13, t.moonlight);
 
     this.renderSpeaker(ctx, w, h);
   }
@@ -1729,76 +1866,93 @@ class Game {
   /*** REGISTER screen: type a name, Enter to save. ***/
   renderRegister(ctx, w, h) {
     this.drawNeonBackdrop(ctx, w, h);
-    const cx = w / 2;
-    this.drawText(ctx, 'Register player', cx, h * 0.2, 36, CONFIG.THEME.cyan);
-    this.drawText(ctx, 'Type a name, then press Enter', cx, h * 0.28, 18, CONFIG.BRAND.main);
+    const cx = w / 2, t = CONFIG.THEME;
 
-    // Input box with a blinking caret
-    const bw = 300, bh = 60, bx = cx - bw / 2, by = h * 0.36;
+    const panelW = 320, panelX = cx - panelW / 2, panelY = h * 0.22, panelH = h * 0.5;
+    this.drawPanel(ctx, panelX, panelY, panelW, panelH);
+
+    const s = this.makeStack(panelY + 28, 18);
+    this.drawText(ctx, 'Register Player', cx, s.next(32), 32, t.moonlight);
+    this.drawText(ctx, 'Type a name, then press Enter', cx, s.next(18), 16, CONFIG.BRAND.main);
+    s.space(6);
+
+    // Input box
+    const bw = 260, bh = 56, bx = cx - bw / 2;
+    const by = s.next(bh) - bh / 2;
     ctx.save();
-    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = CONFIG.THEME.cyan; ctx.shadowBlur = CONFIG.THEME.glowBlur; }
-    ctx.fillStyle = 'rgba(10,20,40,0.85)';
+    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = t.moonlight; ctx.shadowBlur = t.glowBlur; }
+    ctx.fillStyle = 'rgba(10,20,40,0.9)';
     ctx.fillRect(bx, by, bw, bh);
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = CONFIG.THEME.cyan;
+    ctx.lineWidth = 2.5; ctx.strokeStyle = t.moonlight;
     ctx.strokeRect(bx, by, bw, bh);
     ctx.restore();
     const caret = (Math.floor(this.elapsed * 2) % 2 === 0) ? '|' : '';
-    this.drawText(ctx, (this.nameBuffer || 'Enter name') + caret, cx, by + bh / 2, 26,
-      this.nameBuffer ? CONFIG.BRAND.main : 'rgba(219,231,255,0.4)');
+    this.drawText(ctx, (this.nameBuffer || 'Enter name') + caret, cx, by + bh / 2, 24,
+      this.nameBuffer ? CONFIG.BRAND.main : 'rgba(221,238,255,0.4)');
 
-    // Existing players
+    s.space(8);
     const profs = Storage.getProfiles();
     if (profs.length) {
-      this.drawText(ctx, 'Saved: ' + profs.slice(0, 6).join(', '), cx, by + bh + 40, 16, CONFIG.THEME.moonlight);
+      this.drawText(ctx, 'Saved players', cx, s.next(16), 14, t.gold);
+      this.drawText(ctx, profs.slice(0, 5).join('  ·  '), cx, s.next(16), 14, t.moonlight);
     }
 
-    this.registerBackRect = this.drawButton(ctx, 'Back', cx, h * 0.8, 180, 52, CONFIG.THEME.moonlight);
+    this.registerBackRect = this.drawButton(ctx, 'Back', cx, panelY + panelH - 36, 180, 48, t.p2);
     this.renderSpeaker(ctx, w, h);
   }
 
-  /*** DUEL SETUP: both players type their names before the match. ***/
+  /*** DUEL SETUP: both players type their names and pick a chomper colour.
+   * Each player gets a bordered card so the two setups never overlap. ***/
   renderDuelSetup(ctx, w, h) {
     this.drawNeonBackdrop(ctx, w, h);
-    const cx = w / 2;
-    const t = CONFIG.THEME;
-    this.drawText(ctx, 'Duel setup', cx, h * 0.12, 40, t.cyan);
-    this.drawText(ctx, 'Enter player names', cx, h * 0.19, 20, CONFIG.BRAND.main);
-
+    const cx = w / 2, t = CONFIG.THEME;
+    const cols = CONFIG.DUEL.colours;
     this.duelNameRects = [];
-    const drawField = (idx, label, yFrac, color) => {
-      this.drawText(ctx, label, cx, h * yFrac - 36, 20, color);
-      const bw = 300, bh = 58, bx = cx - bw / 2, by = h * yFrac - bh / 2;
+    this.duelColourRects = [[], []];
+
+    const top = this.makeStack(h * 0.07, 6);
+    this.drawText(ctx, 'Duel Setup', cx, top.next(34), 34, t.moonlight);
+    this.drawText(ctx, 'Name each rival and pick a colour', cx, top.next(16), 15, CONFIG.BRAND.main);
+
+    // Two player cards, stacked with generous spacing
+    const cardW = 320, cardX = cx - cardW / 2, cardH = 150;
+    const cardGap = 18;
+    const firstCardY = h * 0.18;
+
+    const drawCard = (idx, label) => {
+      const cardY = firstCardY + idx * (cardH + cardGap);
+      this.drawPanel(ctx, cardX, cardY, cardW, cardH, 16,
+        idx === 0 ? this.duelColours[0] : this.duelColours[1]);
+      const s = this.makeStack(cardY + 18, 12);
+
+      this.drawText(ctx, label, cx, s.next(18), 16, this.duelColours[idx]);
+
+      // Name input
+      const bw = 250, bh = 44, bx = cx - bw / 2;
+      const by = s.next(bh) - bh / 2;
       const active = this.duelNameActive === idx;
       ctx.save();
-      if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = color; ctx.shadowBlur = active ? CONFIG.THEME.glowBlur : 6; }
-      ctx.fillStyle = 'rgba(10,20,40,0.85)';
+      if (CONFIG.FEATURES.neonTheme && active) { ctx.shadowColor = this.duelColours[idx]; ctx.shadowBlur = t.glowBlur; }
+      ctx.fillStyle = 'rgba(10,20,40,0.9)';
       ctx.fillRect(bx, by, bw, bh);
-      ctx.lineWidth = active ? 3.5 : 2;
-      ctx.strokeStyle = color;
+      ctx.lineWidth = active ? 3 : 1.5;
+      ctx.strokeStyle = this.duelColours[idx];
       ctx.strokeRect(bx, by, bw, bh);
       ctx.restore();
       const caret = (active && Math.floor(this.elapsed * 2) % 2 === 0) ? '|' : '';
       const val = this.duelNames[idx];
-      this.drawText(ctx, (val || (idx === 0 ? 'Player 1' : 'Player 2')) + caret, cx, by + bh / 2, 24,
-        val ? CONFIG.BRAND.main : 'rgba(219,231,255,0.4)', 'center', color);
+      this.drawText(ctx, (val || (idx === 0 ? 'Player 1' : 'Player 2')) + caret, cx, by + bh / 2, 20,
+        val ? CONFIG.BRAND.main : 'rgba(221,238,255,0.4)');
       this.duelNameRects[idx] = { x: bx, y: by, w: bw, h: bh };
-    };
 
-    drawField(0, 'Player 1  (A / D + Z)', 0.30, this.duelColours[0]);
-    drawField(1, 'Player 2  (← / → + X)', 0.52, this.duelColours[1]);
-
-    // Colour swatch rows (one per player), stored as hitboxes
-    this.duelColourRects = [[], []];
-    const cols = CONFIG.DUEL.colours;
-    const drawSwatches = (idx, yFrac) => {
-      const sw = 30, gap = 10, total = cols.length * sw + (cols.length - 1) * gap;
+      // Colour swatches row
+      const sw = 26, gap = 10, total = cols.length * sw + (cols.length - 1) * gap;
       let sx = cx - total / 2;
-      const sy = h * yFrac;
+      const sy = s.next(sw);
       cols.forEach((col) => {
         const sel = this.duelColours[idx] === col;
         ctx.save();
-        if (CONFIG.FEATURES.neonTheme && sel) { ctx.shadowColor = col; ctx.shadowBlur = 14; }
+        if (CONFIG.FEATURES.neonTheme && sel) { ctx.shadowColor = col; ctx.shadowBlur = 12; }
         ctx.beginPath(); ctx.arc(sx + sw / 2, sy, sw / 2, 0, Math.PI * 2);
         ctx.fillStyle = col; ctx.fill();
         ctx.lineWidth = sel ? 3 : 1;
@@ -1809,53 +1963,69 @@ class Game {
         sx += sw + gap;
       });
     };
-    drawSwatches(0, 0.40);
-    drawSwatches(1, 0.62);
+    drawCard(0, 'Player 1 · A / D + Z');
+    drawCard(1, 'Player 2 · ← / → + X');
 
-    this.duelStartRect = this.drawButton(ctx, 'Start Duel', cx, h * 0.74, 220, 56, t.moonlight);
-    this.duelSetupBackRect = this.drawButton(ctx, 'Back', cx, h * 0.84, 160, 48, t.p2);
-    this.drawText(ctx, 'Tab switches fields · pick a chomper colour', cx, h * 0.91, 13, CONFIG.BRAND.main);
+    // Buttons below the cards
+    const btnY = firstCardY + 2 * (cardH + cardGap) + 20;
+    this.duelStartRect = this.drawButton(ctx, 'Start Duel', cx, btnY, 220, 54, t.moonlight);
+    this.duelSetupBackRect = this.drawButton(ctx, 'Back', cx, btnY + 64, 150, 46, t.p2);
     this.renderSpeaker(ctx, w, h);
   }
 
-  /*** LEADERBOARD screen: top scores + recent history. ***/
+  /*** LEADERBOARD screen: top scores + recent history, inside panels. ***/
   renderLeaderboard(ctx, w, h) {
     this.drawNeonBackdrop(ctx, w, h);
-    const cx = w / 2;
-    this.drawText(ctx, 'Leaderboard', cx, h * 0.12, 40, CONFIG.THEME.cyan);
+    const cx = w / 2, t = CONFIG.THEME;
+
+    const title = this.makeStack(h * 0.07, 6);
+    this.drawText(ctx, 'Leaderboard', cx, title.next(36), 36, t.moonlight);
 
     const board = Storage.getLeaderboard();
-    let y = h * 0.22;
+    const recent = Storage.getHistory(null, 5);
+
+    // Top scores panel
+    const pW = 340, pX = cx - pW / 2;
+    const rows = Math.max(1, Math.min(board.length, 10));
+    const topH = 44 + rows * 30;
+    const topY = h * 0.15;
+    this.drawPanel(ctx, pX, topY, pW, topH);
+    const s = this.makeStack(topY + 18, 8);
+    this.drawText(ctx, 'Top Scores', cx, s.next(18), 16, t.gold);
     if (!board.length) {
-      this.drawText(ctx, 'No scores yet. Go play!', cx, y, 20, CONFIG.BRAND.main);
+      this.drawText(ctx, 'No scores yet — go play!', cx, s.next(20), 16, CONFIG.BRAND.main);
     } else {
       board.forEach((e, i) => {
-        const col = i === 0 ? CONFIG.THEME.cyan : CONFIG.BRAND.main;
-        this.drawText(ctx, `${i + 1}. ${e.name}`, w * 0.2, y, 22, col, 'left');
-        this.drawText(ctx, `${e.score}`, w * 0.8, y, 22, col, 'right');
-        y += 36;
+        const rowY = s.next(26);
+        const col = i === 0 ? t.gold : CONFIG.BRAND.main;
+        this.drawText(ctx, `${i + 1}.  ${e.name}`, pX + 22, rowY, 18, col, 'left');
+        this.drawText(ctx, `${e.score}`, pX + pW - 22, rowY, 18, col, 'right');
       });
     }
 
-    // Recent games
-    const recent = Storage.getHistory(null, 5);
+    // Recent games panel
     if (recent.length) {
-      y += 16;
-      this.drawText(ctx, 'Recent games', cx, y, 20, CONFIG.THEME.moonlight); y += 30;
-      recent.forEach(r => {
-        const label = `${r.name} · ${r.score} · ${r.mode}${r.result ? ' · ' + r.result : ''}`;
-        this.drawText(ctx, label, cx, y, 15, CONFIG.BRAND.main); y += 24;
+      const rH = 44 + recent.length * 24;
+      const rY = topY + topH + 22;
+      this.drawPanel(ctx, pX, rY, pW, rH);
+      const r2 = this.makeStack(rY + 18, 6);
+      this.drawText(ctx, 'Recent Games', cx, r2.next(18), 16, t.gold);
+      recent.forEach(rg => {
+        const label = `${rg.name} · ${rg.score} · ${rg.mode}${rg.result ? ' · ' + rg.result : ''}`;
+        this.drawText(ctx, label, cx, r2.next(20), 14, CONFIG.BRAND.main);
       });
     }
 
-    this.leaderboardBackRect = this.drawButton(ctx, 'Back', cx, h * 0.9, 180, 52, CONFIG.THEME.moonlight);
+    this.leaderboardBackRect = this.drawButton(ctx, 'Back', cx, h * 0.92, 180, 50, t.p2);
     this.renderSpeaker(ctx, w, h);
   }
 
   /*** DUEL render: two stacked halves; top half rotated 180° for the player
    * sitting across the table. Divider + per-player HUD + winner overlay. ***/
   renderDuel(ctx, w, h) {
-    this.drawNeonBackdrop(ctx, w, h);
+    const intensity = (this.state === 'duelPlaying' && this.timeLeft <= 10)
+      ? (1 - this.timeLeft / 10) : 0;
+    this.drawBackground(ctx, w, h, intensity);
     const sideBySide = this.duelLayout() === 'sideBySide';
 
     this._drawDuelHalf(ctx, 0, w, h);
