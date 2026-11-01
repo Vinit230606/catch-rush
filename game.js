@@ -50,7 +50,10 @@ const CONFIG = {
     roundSeconds: 45,        // duel round length (s)
     lives: 5,                // lives each (shared rules, a bit more forgiving)
     winBy: "score",          // highest score at time-up wins
-    dividerColor: "#5ad7ff", // centre divider line
+    dividerColor: "#5ad7ff", // divider line between the two halves
+    // Layout: "auto" picks side-by-side on landscape (laptop) and top/bottom
+    // on portrait (phone). Force with "sideBySide" or "topBottom".
+    layout: "auto",
   },
 
   // ----- WARM-UP (zero-friction first seconds; F2) -----
@@ -267,6 +270,8 @@ class Game {
     this.players = [];                // duel players (two basket objects)
     this.duelWinner = null;           // index 0/1, or -1 for a tie
     this.returnTo = 'start';          // where screens like register/leaderboard return
+    this.duelNames = ['', ''];        // names typed on the duel setup screen
+    this.duelNameActive = 0;          // which name field is focused (0 or 1)
 
     // Effects
     this.effects = {};                // active power-ups: effect -> { timeLeft, duration, icon }
@@ -496,8 +501,19 @@ class Game {
     this.startGame();
   }
 
-  /*** Build a duel player (basket) occupying one half of the screen.
-   * zone.top/bottom are logical Y bounds for that player's play area. ***/
+  /*** Resolve the active duel layout. "auto" => side-by-side on a wide
+   * (landscape / laptop) window, top/bottom on a tall (portrait / phone)
+   * window. In side-by-side both players sit upright facing the screen; in
+   * top/bottom the top half is rotated 180° for the player sitting across. ***/
+  duelLayout() {
+    const cfg = CONFIG.DUEL.layout;
+    if (cfg === 'sideBySide' || cfg === 'topBottom') return cfg;
+    const landscape = (typeof window !== 'undefined') &&
+      window.innerWidth >= window.innerHeight;
+    return landscape ? 'sideBySide' : 'topBottom';
+  }
+
+  /*** Build a duel player (basket) occupying one half of the screen. ***/
   makeDuelPlayer(index, name) {
     const t = CONFIG.THEME;
     return {
@@ -507,21 +523,47 @@ class Game {
       score: 0,
       lives: CONFIG.DUEL.lives,
       x: CONFIG.CANVAS_WIDTH / 2,
+      pos: CONFIG.CANVAS_WIDTH / 2, // position along the movement axis
       squash: 0,
       redFlash: 0,
     };
   }
 
-  /*** Start a local duel. Screen is split top/bottom; top half is player 2
-   * (rotated 180° when drawn) so two people facing each other both see their
-   * own side upright. ***/
-  startDuel() {
-    this.mode = 'duel';
+  /*** Open the duel setup screen where both players type their names.
+   * Pre-fills from saved profiles when available. ***/
+  openDuelSetup() {
     const profs = Storage.getProfiles();
+    this.duelNames = [profs[0] || '', profs[1] || ''];
+    this.duelNameActive = 0;
+    this.state = 'duelSetup';
+  }
+
+  /*** Begin the duel using the typed names (falling back to defaults). ***/
+  beginDuelFromSetup() {
+    const n1 = (this.duelNames[0] || '').trim() || 'Player 1';
+    const n2 = (this.duelNames[1] || '').trim() || 'Player 2';
+    // Remember the names as profiles so they show up next time / on leaderboard
+    if (CONFIG.FEATURES.profiles) {
+      if (n1 !== 'Player 1') Storage.addProfile(n1);
+      if (n2 !== 'Player 2') Storage.addProfile(n2);
+    }
+    this.startDuel(n1, n2);
+  }
+
+  /*** Start a local duel with the given names. Layout (side-by-side vs
+   * top/bottom) is chosen by duelLayout() at render/update time. ***/
+  startDuel(name1, name2) {
+    this.mode = 'duel';
     this.players = [
-      this.makeDuelPlayer(0, profs[0] || 'Player 1'),
-      this.makeDuelPlayer(1, profs[1] || 'Player 2'),
+      this.makeDuelPlayer(0, name1 || 'Player 1'),
+      this.makeDuelPlayer(1, name2 || 'Player 2'),
     ];
+    // Centre each basket within its zone for the active layout
+    for (let i = 0; i < 2; i++) {
+      const z = this.duelZone(i);
+      this.players[i].pos = (z.min + z.max) / 2;
+      this.players[i].x = this.players[i].pos;
+    }
     this.fallers = [];
     this.bursts = [];
     this.floaters = [];
@@ -568,6 +610,32 @@ class Game {
       this.nameBuffer += k;
       e.preventDefault();
     }
+  }
+
+  /*** Duel setup screen: type both player names. Tab/Enter switches fields;
+   * Enter on the second field (or the Start button) begins the duel. ***/
+  handleDuelSetupKey(e) {
+    const k = e.key;
+    const i = this.duelNameActive;
+    if (k === 'Tab') { this.duelNameActive = i === 0 ? 1 : 0; e.preventDefault(); return; }
+    if (k === 'Escape') { this.state = 'menu'; e.preventDefault(); return; }
+    if (k === 'Enter') {
+      if (i === 0) this.duelNameActive = 1;      // move to player 2
+      else this.beginDuelFromSetup();            // both done -> start
+      e.preventDefault();
+      return;
+    }
+    if (k === 'Backspace') { this.duelNames[i] = this.duelNames[i].slice(0, -1); e.preventDefault(); return; }
+    if (k.length === 1 && this.duelNames[i].length < 14 && /[\w ]/.test(k)) {
+      this.duelNames[i] += k;
+      e.preventDefault();
+    }
+  }
+
+  /*** Replay the duel with the same two players. ***/
+  rematchDuel() {
+    const [a, b] = this.players;
+    this.startDuel(a ? a.name : 'Player 1', b ? b.name : 'Player 2');
   }
 
   /*** Toggle pause (works for classic and duel) ***/
@@ -636,8 +704,9 @@ class Game {
       this.ensureAudio(); // first gesture unlocks audio
       const k = e.key;
 
-      // Register screen captures typing
+      // Text-entry screens capture typing
       if (this.state === 'register') { this.handleRegisterKey(e); return; }
+      if (this.state === 'duelSetup') { this.handleDuelSetupKey(e); return; }
 
       if (k === 'm' || k === 'M') { this.muted = !this.muted; e.preventDefault(); return; }
 
@@ -669,7 +738,7 @@ class Game {
           if (k === 'r' || k === 'R' || confirmKey) { this.restart(); e.preventDefault(); }
           break;
         case 'duelOver':
-          if (k === 'r' || k === 'R' || confirmKey) { this.startDuel(); e.preventDefault(); }
+          if (k === 'r' || k === 'R' || confirmKey) { this.rematchDuel(); e.preventDefault(); }
           break;
         case 'leaderboard':
           if (confirmKey || k === 'Escape') { this.state = this.returnTo; e.preventDefault(); }
@@ -719,7 +788,7 @@ class Game {
         case 'menu': {
           const b = this.menuButtons || {};
           if (inRect(b.classic, px, py)) this.startClassic();
-          else if (inRect(b.duel, px, py)) this.startDuel();
+          else if (inRect(b.duel, px, py)) this.openDuelSetup();
           else if (inRect(b.leaderboard, px, py)) { this.returnTo = 'menu'; this.state = 'leaderboard'; }
           else if (inRect(b.register, px, py)) { this.returnTo = 'menu'; this.state = 'register'; }
           return;
@@ -727,6 +796,14 @@ class Game {
         case 'register':
           if (inRect(this.registerBackRect, px, py)) { this.nameBuffer = ''; this.state = this.returnTo; }
           return;
+        case 'duelSetup': {
+          const rects = this.duelNameRects || [];
+          if (inRect(rects[0], px, py)) this.duelNameActive = 0;
+          else if (inRect(rects[1], px, py)) this.duelNameActive = 1;
+          else if (inRect(this.duelStartRect, px, py)) this.beginDuelFromSetup();
+          else if (inRect(this.duelSetupBackRect, px, py)) this.state = 'menu';
+          return;
+        }
         case 'leaderboard':
           if (inRect(this.leaderboardBackRect, px, py)) this.state = this.returnTo;
           return;
@@ -743,9 +820,9 @@ class Game {
           return;
         case 'duelPlaying': {
           // Each touch controls the basket in the half it belongs to.
-          const half = py >= CONFIG.CANVAS_HEIGHT / 2 ? 0 : 1;
+          const half = this.duelHalfAt(px, py);
           this.duelPointers[e.pointerId] = half;
-          this._duelPointerMove(half, px);
+          this._duelPointerMove(half, px, py);
           try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
           return;
         }
@@ -763,7 +840,7 @@ class Game {
         this.basketTargetX = px;
       } else if (this.state === 'duelPlaying') {
         const half = this.duelPointers[e.pointerId];
-        if (half !== undefined) this._duelPointerMove(half, px);
+        if (half !== undefined) this._duelPointerMove(half, px, py);
       }
     };
     const end = e => {
@@ -792,7 +869,8 @@ class Game {
 
     // Menu-like screens animate decorative fallers only
     if (this.state === 'start' || this.state === 'menu' ||
-        this.state === 'register' || this.state === 'leaderboard') {
+        this.state === 'register' || this.state === 'leaderboard' ||
+        this.state === 'duelSetup') {
       for (const d of this.decor) { d.y += d.speed * dt; d.spin += dt; }
       this.decor = this.decor.filter(d => d.y - d.h / 2 <= CONFIG.CANVAS_HEIGHT);
       while (this.decor.length < 6) this.spawnDecor(false);
@@ -954,77 +1032,103 @@ class Game {
     }
   }
 
-  /*** DUEL update: two stacked play areas sharing the 450x800 canvas.
-   * Bottom half (y: mid..H) belongs to player 1, basket near the bottom,
-   * items fall downward. Top half (y: 0..mid) belongs to player 2, basket
-   * near the top, items fall upward. Each half spawns and scores on its own. ***/
+  /*** Geometry for a duel player's zone, depending on the active layout.
+   * Returns, in canvas coordinates:
+   *   axis       : "x" (move horizontally) or "y" (move vertically)
+   *   min,max    : movement bounds along that axis for the basket centre
+   *   fixed      : the basket's position on the other axis
+   *   spawnMin/spawnMax : range along the movement axis where items appear
+   *   fallDir    : +1 or -1 direction items travel along the fixed axis
+   *   rotated    : whether this half is drawn rotated 180° (phone top player)
+   *
+   * Layouts:
+   *  - sideBySide (laptop): two columns. Both baskets at the bottom, items
+   *    fall down. P1 = left column, P2 = right column. Both upright.
+   *  - topBottom (phone): two rows. P1 bottom (upright, items fall down),
+   *    P2 top (rotated 180°, items fall up toward the top basket). ***/
+  duelZone(index) {
+    const W = CONFIG.CANVAS_WIDTH, H = CONFIG.CANVAS_HEIGHT;
+    const bw = CONFIG.PLAYER.width, halfBW = bw / 2;
+    const layout = this.duelLayout();
+    if (layout === 'sideBySide') {
+      const colMin = index === 0 ? halfBW : W / 2 + halfBW;
+      const colMax = index === 0 ? W / 2 - halfBW : W - halfBW;
+      const spawnMin = index === 0 ? 0 : W / 2;
+      return {
+        layout, axis: 'x', min: colMin, max: colMax,
+        fixed: H - 30, spawnMin: spawnMin + 10, spawnMax: spawnMin + W / 2 - 10,
+        fallDir: +1, rotated: false,
+      };
+    }
+    // topBottom
+    if (index === 0) {
+      return { layout, axis: 'x', min: halfBW, max: W - halfBW,
+        fixed: H - 30, spawnMin: 10, spawnMax: W - 10, fallDir: +1, rotated: false };
+    }
+    return { layout, axis: 'x', min: halfBW, max: W - halfBW,
+      fixed: 30, spawnMin: 10, spawnMax: W - 10, fallDir: -1, rotated: true };
+  }
+
+  /*** DUEL update: layout-aware. Each player owns a zone (column on laptop,
+   * row on phone). Items spawn in their zone and travel toward their basket. ***/
   updateDuel(dt) {
-    const W = CONFIG.CANVAS_WIDTH, H = CONFIG.CANVAS_HEIGHT, mid = H / 2;
     const speed = CONFIG.PLAYER.speed;
-    const halfBW = CONFIG.PLAYER.width / 2;
-
-    // Move baskets from keyboard (p1 = A/D, p2 = arrows)
     const [p1, p2] = this.players;
-    let d1 = 0;
-    if (this.keysDown['p1left']) d1 -= 1;
-    if (this.keysDown['p1right']) d1 += 1;
-    p1.x = Math.max(halfBW, Math.min(W - halfBW, p1.x + d1 * speed * dt));
-    let d2 = 0;
-    // Player 2 sits across the table (rotated view), so flip their left/right
-    if (this.keysDown['p2left']) d2 += 1;
-    if (this.keysDown['p2right']) d2 -= 1;
-    p2.x = Math.max(halfBW, Math.min(W - halfBW, p2.x + d2 * speed * dt));
 
-    // Decay per-player feedback timers
+    // Keyboard movement. p1 = A/D, p2 = arrows. In side-by-side both move
+    // left/right normally. In top/bottom, p2 is rotated so we flip them.
+    const z2 = this.duelZone(1);
+    const moveAlong = (player, zone, neg, pos) => {
+      let d = 0;
+      if (this.keysDown[neg]) d -= 1;
+      if (this.keysDown[pos]) d += 1;
+      if (zone.rotated) d = -d; // rotated view: invert control direction
+      player.pos = Math.max(zone.min, Math.min(zone.max, (player.pos ?? player.x) + d * speed * dt));
+      player.x = player.pos;
+    };
+    moveAlong(p1, this.duelZone(0), 'p1left', 'p1right');
+    moveAlong(p2, z2, 'p2left', 'p2right');
+
+    // Decay per-player + shared timers
     for (const p of this.players) {
       p.squash = Math.max(0, p.squash - dt);
       p.redFlash = Math.max(0, p.redFlash - dt);
     }
-    // Shared visual effect timers
     this.basketSquash = Math.max(0, this.basketSquash - dt);
-    for (let i = this.bursts.length - 1; i >= 0; i--) {
-      const b = this.bursts[i]; b.t += dt;
-      if (b.t >= b.life) this.bursts.splice(i, 1);
-    }
-    for (let i = this.floaters.length - 1; i >= 0; i--) {
-      const f = this.floaters[i]; f.t += dt;
-      if (f.t >= f.life) this.floaters.splice(i, 1);
-    }
+    for (let i = this.bursts.length - 1; i >= 0; i--) { const b = this.bursts[i]; b.t += dt; if (b.t >= b.life) this.bursts.splice(i, 1); }
+    for (let i = this.floaters.length - 1; i >= 0; i--) { const f = this.floaters[i]; f.t += dt; if (f.t >= f.life) this.floaters.splice(i, 1); }
 
     // Timer
     this.roundElapsed += dt;
     this.timeLeft -= dt;
     if (this.timeLeft <= 0) { this.timeLeft = 0; this.duelOver(); return; }
-
-    // Knockout: if a player loses all lives, end early
     if (p1.lives <= 0 || p2.lives <= 0) { this.duelOver(); return; }
 
-    // Spawn: one item into a random half every interval (no power-ups in duel
-    // to keep it a pure reflex race; stars and bombs only)
+    // Spawn one item per player per interval
     const progress = 1 - (this.timeLeft / CONFIG.DUEL.roundSeconds);
     const curInterval = CONFIG.RULES.spawnIntervalStart +
       (CONFIG.RULES.spawnIntervalEnd - CONFIG.RULES.spawnIntervalStart) * progress;
     this.spawnTimer += dt;
     while (this.spawnTimer >= curInterval) {
       this.spawnTimer -= curInterval;
-      this.spawnDuelItem(0); // bottom (p1)
-      this.spawnDuelItem(1); // top (p2)
+      this.spawnDuelItem(0);
+      this.spawnDuelItem(1);
     }
 
-    // Move + collide fallers
+    // Move + collide fallers (always fall vertically toward the basket row)
     const rampMul = 1 + (CONFIG.RULES.fallSpeedRampMax - 1) * progress;
+    const H = CONFIG.CANVAS_HEIGHT;
     for (let i = this.fallers.length - 1; i >= 0; i--) {
       const f = this.fallers[i];
-      const dirY = f.half === 0 ? 1 : -1; // p1 falls down, p2 falls up
-      f.y += f.speed * rampMul * dt * dirY;
+      const zone = this.duelZone(f.half);
+      f.y += f.speed * rampMul * dt * zone.fallDir;
       if (f.def.type === 'good') f.spin += dt * 2; else f.wobblePhase += dt * 6;
 
       const player = this.players[f.half];
-      const basketCY = f.half === 0 ? (H - 30) : 30;
       const bHalfW = (CONFIG.PLAYER.width * 0.7) / 2;
       const iHalfW = (f.w * 0.7) / 2, iHalfH = (f.h * 0.7) / 2;
       const overlapX = Math.abs(f.x - player.x) < (bHalfW + iHalfW);
-      const overlapY = Math.abs(f.y - basketCY) < (iHalfH + 26);
+      const overlapY = Math.abs(f.y - zone.fixed) < (iHalfH + 26);
       if (overlapX && overlapY) {
         if (f.def.type === 'good') {
           player.score += f.def.points;
@@ -1041,37 +1145,45 @@ class Game {
         this.fallers.splice(i, 1);
         continue;
       }
-      // Cull when it leaves that player's half
-      if (f.half === 0 && f.y - f.h / 2 > H) this.fallers.splice(i, 1);
-      else if (f.half === 1 && f.y + f.h / 2 < 0) this.fallers.splice(i, 1);
+      // Cull when it leaves the canvas in its travel direction
+      if (zone.fallDir > 0 && f.y - f.h / 2 > H) this.fallers.splice(i, 1);
+      else if (zone.fallDir < 0 && f.y + f.h / 2 < 0) this.fallers.splice(i, 1);
     }
   }
 
-  /*** Map a raw touch x to a duel basket target. Player 2's half is drawn
-   * rotated 180°, so their x is mirrored to feel natural from across. ***/
-  _duelPointerMove(half, px) {
+  /*** Map a raw touch to a duel basket target, respecting the zone + rotation. ***/
+  _duelPointerMove(half, px, py) {
     if (!this.players || this.players.length < 2) return;
-    const W = CONFIG.CANVAS_WIDTH;
-    const halfBW = CONFIG.PLAYER.width / 2;
-    const x = half === 1 ? (W - px) : px; // mirror for the rotated top player
-    this.players[half].x = Math.max(halfBW, Math.min(W - halfBW, x));
+    const zone = this.duelZone(half);
+    let v = px; // movement axis is always x in both layouts
+    if (zone.rotated) v = CONFIG.CANVAS_WIDTH - px; // mirror for rotated top player
+    const player = this.players[half];
+    player.pos = Math.max(zone.min, Math.min(zone.max, v));
+    player.x = player.pos;
   }
 
-  /*** Spawn one star/bomb into a given half (0 = bottom/p1, 1 = top/p2). ***/
+  /*** Which half does a touch at (px,py) belong to, for the active layout? ***/
+  duelHalfAt(px, py) {
+    if (this.duelLayout() === 'sideBySide') return px < CONFIG.CANVAS_WIDTH / 2 ? 0 : 1;
+    return py >= CONFIG.CANVAS_HEIGHT / 2 ? 0 : 1; // bottom = p1, top = p2
+  }
+
+  /*** Spawn one star/bomb into a given player's zone. ***/
   spawnDuelItem(half) {
+    const zone = this.duelZone(half);
     const pool = CONFIG.items.filter(it => it.type === 'good' || it.type === 'bad');
-    // weighted pick among just good/bad
     const tw = pool.reduce((s, it) => s + it.weight, 0);
     let r = Math.random() * tw, def = pool[pool.length - 1];
     for (const it of pool) { r -= it.weight; if (r <= 0) { def = it; break; } }
     const img = this.assets.items[def.name];
     const w = def.width;
     const h = (img.naturalHeight / img.naturalWidth) * w;
-    const x = Math.random() * (CONFIG.CANVAS_WIDTH - w) + w / 2;
+    // x within the zone's spawn range, clamped so the sprite stays on screen
+    const lo = zone.spawnMin + w / 2, hi = zone.spawnMax - w / 2;
+    const x = Math.max(w / 2, Math.min(CONFIG.CANVAS_WIDTH - w / 2, lo + Math.random() * Math.max(1, hi - lo)));
     const speed = CONFIG.RULES.fallSpeedMin +
       Math.random() * (CONFIG.RULES.fallSpeedMax - CONFIG.RULES.fallSpeedMin);
-    // Start just off the edge of that half's entry side
-    const y = half === 0 ? -h / 2 : CONFIG.CANVAS_HEIGHT + h / 2;
+    const y = zone.fallDir > 0 ? -h / 2 : CONFIG.CANVAS_HEIGHT + h / 2;
     this.fallers.push({ def, img, w, h, x, y, speed, spin: 0, wobblePhase: Math.random() * Math.PI * 2, half });
   }
 
@@ -1087,6 +1199,7 @@ class Game {
     if (this.state === 'start') { this.renderStart(ctx, w, h); return; }
     if (this.state === 'menu') { this.renderMenu(ctx, w, h); return; }
     if (this.state === 'register') { this.renderRegister(ctx, w, h); return; }
+    if (this.state === 'duelSetup') { this.renderDuelSetup(ctx, w, h); return; }
     if (this.state === 'leaderboard') { this.renderLeaderboard(ctx, w, h); return; }
     if (this.state === 'duelPlaying' || this.state === 'duelOver') { this.renderDuel(ctx, w, h); return; }
 
@@ -1424,6 +1537,48 @@ class Game {
     this.renderSpeaker(ctx, w, h);
   }
 
+  /*** DUEL SETUP: both players type their names before the match. ***/
+  renderDuelSetup(ctx, w, h) {
+    this.drawNeonBackdrop(ctx, w, h);
+    const cx = w / 2;
+    const t = CONFIG.THEME;
+    this.drawText(ctx, 'Duel setup', cx, h * 0.12, 40, t.cyan);
+    this.drawText(ctx, 'Enter player names', cx, h * 0.19, 20, CONFIG.BRAND.main);
+
+    this.duelNameRects = [];
+    const drawField = (idx, label, yFrac, color) => {
+      this.drawText(ctx, label, cx, h * yFrac - 36, 20, color);
+      const bw = 300, bh = 58, bx = cx - bw / 2, by = h * yFrac - bh / 2;
+      const active = this.duelNameActive === idx;
+      ctx.save();
+      if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = color; ctx.shadowBlur = active ? CONFIG.THEME.glowBlur : 6; }
+      ctx.fillStyle = 'rgba(10,20,40,0.85)';
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.lineWidth = active ? 3.5 : 2;
+      ctx.strokeStyle = color;
+      ctx.strokeRect(bx, by, bw, bh);
+      ctx.restore();
+      const caret = (active && Math.floor(this.elapsed * 2) % 2 === 0) ? '|' : '';
+      const val = this.duelNames[idx];
+      this.drawText(ctx, (val || (idx === 0 ? 'Player 1' : 'Player 2')) + caret, cx, by + bh / 2, 24,
+        val ? CONFIG.BRAND.main : 'rgba(219,231,255,0.4)', 'center', color);
+      this.duelNameRects[idx] = { x: bx, y: by, w: bw, h: bh };
+    };
+
+    drawField(0, 'Player 1  (A / D)', 0.34, t.p1);
+    drawField(1, 'Player 2  (← / →)', 0.50, t.p2);
+
+    const layoutLabel = this.duelLayout() === 'sideBySide'
+      ? 'Laptop: side-by-side screen'
+      : 'Phone: split screen, sit opposite';
+    this.drawText(ctx, layoutLabel, cx, h * 0.60, 16, t.moonlight);
+
+    this.duelStartRect = this.drawButton(ctx, 'Start Duel', cx, h * 0.72, 220, 60, t.cyan);
+    this.duelSetupBackRect = this.drawButton(ctx, 'Back', cx, h * 0.83, 160, 50, t.moonlight);
+    this.drawText(ctx, 'Tip: Tab switches fields, Enter confirms', cx, h * 0.90, 14, CONFIG.BRAND.main);
+    this.renderSpeaker(ctx, w, h);
+  }
+
   /*** LEADERBOARD screen: top scores + recent history. ***/
   renderLeaderboard(ctx, w, h) {
     this.drawNeonBackdrop(ctx, w, h);
@@ -1461,92 +1616,120 @@ class Game {
   /*** DUEL render: two stacked halves; top half rotated 180° for the player
    * sitting across the table. Divider + per-player HUD + winner overlay. ***/
   renderDuel(ctx, w, h) {
-    const mid = h / 2;
     this.drawNeonBackdrop(ctx, w, h);
+    const sideBySide = this.duelLayout() === 'sideBySide';
 
-    // Draw each half in its own transformed space so sprites face each player.
-    this._drawDuelHalf(ctx, 0, w, h); // bottom (upright)
-    this._drawDuelHalf(ctx, 1, w, h); // top (rotated 180)
+    this._drawDuelHalf(ctx, 0, w, h);
+    this._drawDuelHalf(ctx, 1, w, h);
 
-    // Centre divider with glow
+    // Divider with glow — vertical for side-by-side, horizontal for top/bottom
     ctx.save();
     if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = CONFIG.DUEL.dividerColor; ctx.shadowBlur = 20; }
     ctx.strokeStyle = CONFIG.DUEL.dividerColor;
     ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+    ctx.beginPath();
+    if (sideBySide) { ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h); }
+    else { ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); }
+    ctx.stroke();
     ctx.restore();
 
-    // Shared timer at the centre divider
+    // Shared timer: centre for phone, top-centre for laptop (both upright)
     const secs = Math.ceil(this.timeLeft);
-    this.drawText(ctx, String(secs), w / 2, mid, 30, secs <= 10 ? '#ff6b6b' : CONFIG.THEME.cyan);
+    const tCol = secs <= 10 ? '#ff6b6b' : CONFIG.THEME.cyan;
+    if (sideBySide) this.drawText(ctx, String(secs), w / 2, 28, 30, tCol);
+    else this.drawText(ctx, String(secs), w / 2, h / 2, 30, tCol);
 
     if (this.state === 'duelOver') this.renderDuelOver(ctx, w, h);
     else this.renderSpeaker(ctx, w, h);
   }
 
-  /*** Draw one duel half: background items + basket + that player's HUD.
-   * half 0 = bottom upright; half 1 = top, rotated 180° about its centre. ***/
-  _drawDuelHalf(ctx, half, w, h) {
-    const mid = h / 2;
-    const player = this.players[half];
+  /*** Draw one duel player's zone: items, basket, HUD. Clipped to the zone.
+   * The phone top player (rotated zone) is drawn rotated 180° so it faces the
+   * opponent across the table; the laptop layout draws both upright. ***/
+  _drawDuelHalf(ctx, index, w, h) {
+    const zone = this.duelZone(index);
+    const player = this.players[index];
+    const sideBySide = zone.layout === 'sideBySide';
     ctx.save();
-    // Clip to this half so nothing bleeds across the divider
-    if (half === 0) { ctx.beginPath(); ctx.rect(0, mid, w, mid); ctx.clip(); }
-    else {
-      ctx.beginPath(); ctx.rect(0, 0, w, mid); ctx.clip();
-      // Rotate the top half 180° around the canvas centre so it faces the
-      // opposite player. After this, we can draw in normal coordinates and it
-      // appears upside-down to us but upright to them.
+
+    // Clip to this player's region
+    ctx.beginPath();
+    if (sideBySide) {
+      if (index === 0) ctx.rect(0, 0, w / 2, h); else ctx.rect(w / 2, 0, w / 2, h);
+    } else {
+      if (index === 0) ctx.rect(0, h / 2, w, h / 2); else ctx.rect(0, 0, w, h / 2);
+    }
+    ctx.clip();
+
+    // Rotate the phone top player's view 180°
+    if (zone.rotated) {
+      const mid = h / 2;
       ctx.translate(w / 2, mid / 2);
       ctx.rotate(Math.PI);
       ctx.translate(-w / 2, -mid / 2);
     }
 
-    // Red flash for this player
+    // Red flash over this player's region
     if (player.redFlash > 0) {
       ctx.fillStyle = `rgba(255,0,0,${0.4 * (player.redFlash / 0.2)})`;
-      if (half === 0) ctx.fillRect(0, mid, w, mid); else ctx.fillRect(0, 0, w, mid);
+      if (sideBySide) ctx.fillRect(index === 0 ? 0 : w / 2, 0, w / 2, h);
+      else ctx.fillRect(0, index === 0 ? h / 2 : 0, w, h / 2);
     }
 
-    // Fallers belonging to this half
+    // Fallers
     for (const f of this.fallers) {
-      if (f.half !== half) continue;
+      if (f.half !== index) continue;
       ctx.save();
       if (f.def.type === 'good') { ctx.translate(f.x, f.y); ctx.rotate(f.spin); ctx.drawImage(f.img, -f.w / 2, -f.h / 2, f.w, f.h); }
       else { const wob = Math.sin(f.wobblePhase) * 8; ctx.drawImage(f.img, f.x - f.w / 2 + wob, f.y - f.h / 2, f.w, f.h); }
       ctx.restore();
     }
 
-    // Bursts + floaters for this half
+    // Bursts (filter by rough region) + floaters for this player
     for (const b of this.bursts) {
+      const inRegion = sideBySide
+        ? (index === 0 ? b.x < w / 2 : b.x >= w / 2)
+        : (index === 0 ? b.y >= h / 2 : b.y < h / 2);
+      if (!inRegion) continue;
       const p = b.t / b.life, bw = b.fromW + (b.toW - b.fromW) * p;
       const bh = (b.img.naturalHeight / b.img.naturalWidth) * bw;
       ctx.save(); ctx.globalAlpha = Math.max(0, 1 - p);
       ctx.drawImage(b.img, b.x - bw / 2, b.y - bh / 2, bw, bh); ctx.restore();
     }
     for (const f of this.floaters) {
-      if (f.half !== half) continue;
+      if (f.half !== index) continue;
       const p = f.t / f.life;
       ctx.save(); ctx.globalAlpha = Math.max(0, 1 - p);
       this.drawText(ctx, f.text, f.x, f.y - 30 * p, 22, player.color);
       ctx.restore();
     }
 
-    // Basket, tinted to the player's colour via a glow
+    // Basket at the zone's fixed row, with a coloured glow
     const img = this.assets.basket;
-    const bwid = CONFIG.PLAYER.width * (1 + 0.18 * (player.squash / 0.1 || 0));
-    const bhei = (img.naturalHeight / img.naturalWidth) * bwid * (1 - 0.22 * (player.squash / 0.1 || 0));
-    const by = half === 0 ? (h - 30 - bhei) : (30);
+    const sq = player.squash / 0.1 || 0;
+    const bwid = CONFIG.PLAYER.width * (1 + 0.18 * sq);
+    const bhei = (img.naturalHeight / img.naturalWidth) * bwid * (1 - 0.22 * sq);
+    const by = zone.fixed - bhei / 2;
     ctx.save();
     if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = player.color; ctx.shadowBlur = 18; }
     ctx.drawImage(img, player.x - bwid / 2, by, bwid, bhei);
     ctx.restore();
 
-    // Per-player HUD: name, score, lives — near the inner (divider) edge
-    const baseY = half === 0 ? (mid + 8) : (mid - 8);
-    this.drawText(ctx, `${player.name}`, 14, baseY + 14, 20, player.color, 'left');
-    this.drawText(ctx, `Score ${player.score}`, 14, baseY + 42, 24, CONFIG.BRAND.main, 'left');
-    this.drawText(ctx, '♥'.repeat(Math.max(0, player.lives)), w - 14, baseY + 20, 22, '#ff6b8b', 'right');
+    // Per-player HUD near the far (outer) edge of their zone
+    let nameX, nameY, scoreY, livesX, livesY;
+    if (sideBySide) {
+      nameX = index === 0 ? 14 : w / 2 + 14;
+      nameY = h - 70; scoreY = h - 44;
+      livesX = index === 0 ? w / 2 - 14 : w - 14; livesY = h - 58;
+      this.drawText(ctx, player.name, nameX, nameY, 18, player.color, 'left');
+      this.drawText(ctx, `Score ${player.score}`, nameX, scoreY, 22, CONFIG.BRAND.main, 'left');
+      this.drawText(ctx, '♥'.repeat(Math.max(0, player.lives)), livesX, livesY, 20, '#ff6b8b', 'right');
+    } else {
+      const baseY = index === 0 ? (h / 2 + 8) : (h / 2 - 8);
+      this.drawText(ctx, player.name, 14, baseY + 14, 20, player.color, 'left');
+      this.drawText(ctx, `Score ${player.score}`, 14, baseY + 42, 24, CONFIG.BRAND.main, 'left');
+      this.drawText(ctx, '♥'.repeat(Math.max(0, player.lives)), w - 14, baseY + 20, 22, '#ff6b8b', 'right');
+    }
 
     ctx.restore();
   }

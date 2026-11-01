@@ -9,12 +9,16 @@ Double-click `index.html` to open it in a browser (works from a `file://` URL, n
 ## Modes
 
 - Classic: single-player, 45 seconds, beat your best.
-- Duel (local 2-player): share one screen or phone.
-  - Laptop: Player 1 uses A / D, Player 2 uses the arrow keys.
-  - Phone: hold the phone flat between you; the screen splits top/bottom and the
-    top half is rotated 180° so both players see their side upright. Each player
-    drags in their own half. Highest score when the timer ends wins (a knockout
-    ends it early). The winner gets teased over the loser.
+- Duel (local 2-player): enter both names, then play.
+  - Laptop (landscape): the screen splits left/right, both sides upright.
+    Player 1 uses A / D (left side), Player 2 uses the arrow keys (right side).
+  - Phone (portrait): the screen splits top/bottom and the top half is rotated
+    180° so two people facing each other both see their side upright. Each player
+    drags in their own half.
+  - Highest score when the timer ends wins (a knockout ends it early). The winner
+    gets teased over the loser.
+  - The layout is chosen automatically from the window orientation; force it with
+    `CONFIG.DUEL.layout = "sideBySide"` or `"topBottom"`.
 
 ## Players, history and leaderboard
 
