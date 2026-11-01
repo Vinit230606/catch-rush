@@ -16,44 +16,75 @@ const CONFIG = {
     warmStart: true,     // easy opening: first star near basket, no early bomb
     coachMark: true,     // first-run "Drag to move" hint
     tapAnywhereStart: true, // tapping anywhere on the menu starts the game (Classic)
-    neonTheme: true,     // moonlight-blue neon look with glow
+    neonTheme: true,     // moonlight (Moonline) look with restrained glow
     duel: true,          // enable Duel mode (local 2-player + phone split-screen)
     profiles: true,      // register players, keep history + leaderboard on device
+    abilities: true,     // secret tactical abilities in duel (Z / X + phone buttons)
+    chomper: true,       // draw an original chomper character instead of the basket
+    countdown: true,     // 3-2-1 ready phase before a duel
+    reducedMotion: false, // true = disable the animated live background
   },
 
   // ----- BRAND (theme the whole game from here) -----
-  // Neon night palette: black base, moonlight blue, electric cyan accent.
+  // Moonline palette: midnight navy base, moonlight blue, warm gold, coral.
   BRAND: {
     title: "Catch Rush",                              // shown on the logo badge
+    subtitle: "Moonline Edition",                     // wordmark second line
     tagline: "Catch the stars. Dodge the bombs.",     // start-screen subtitle
-    hook: "Beat your best in 45 seconds.",            // one-line hook on the menu
+    hook: "45 seconds. Two rivals. One winner.",      // one-line hook on the menu
     font: "sans-serif",                               // font family for ALL text
-    main: "#dbe7ff",                                  // main text colour (moonlight white-blue)
-    accent: "#5ad7ff",                                // accent / highlight colour (electric cyan)
+    main: "#ddeeff",                                  // ice-white main text
+    accent: "#8bdfff",                                // moonlight-blue accent
   },
 
-  // ----- THEME (neon look; used when FEATURES.neonTheme is on) -----
+  // ----- THEME (Moonline palette; used when FEATURES.neonTheme is on) -----
   THEME: {
-    bgTop: "#060912",        // deep near-black (top of backdrop gradient)
-    bgBottom: "#0d1a33",     // moonlight-blue navy (bottom of gradient)
-    moonlight: "#8ab4f8",    // moonlight blue
-    cyan: "#5ad7ff",         // electric cyan accent
-    glow: "#5ad7ff",         // glow colour for text/sprites
-    glowBlur: 16,            // shadowBlur used for the neon glow
-    p1: "#5ad7ff",           // duel player 1 colour (cyan)
-    p2: "#c08bff",           // duel player 2 colour (violet, complements cyan)
-    grid: "rgba(138,180,248,0.08)", // faint grid lines on the backdrop
+    bgTop: "#050a13",        // midnight navy (top of backdrop gradient)
+    bgBottom: "#0a1626",     // slightly lifted navy (bottom of gradient)
+    moonlight: "#8bdfff",    // moonlight blue (primary player, highlights)
+    cyan: "#8bdfff",         // alias kept for existing references
+    gold: "#f5cd6b",         // warm gold (stars, score feedback)
+    coral: "#f07f8b",        // coral red (bombs, danger)
+    glow: "#8bdfff",         // glow colour for text/sprites
+    glowBlur: 14,            // shadowBlur used for the restrained glow
+    p1: "#8bdfff",           // duel player 1 colour (moonlight blue)
+    p2: "#d6a486",           // duel player 2 colour (muted copper)
+    grid: "rgba(139,223,255,0.06)", // faint grid lines on the backdrop
   },
 
   // ----- DUEL (local 2-player) -----
   DUEL: {
     roundSeconds: 45,        // duel round length (s)
-    lives: 5,                // lives each (shared rules, a bit more forgiving)
-    winBy: "score",          // highest score at time-up wins
-    dividerColor: "#5ad7ff", // divider line between the two halves
+    lives: 3,                // lives each (matches PRD: 3 per player)
+    winBy: "score",          // highest score at time-up wins; equal = draw
+    dividerColor: "#8bdfff", // divider line between the two halves
+    countdownSeconds: 3,     // 3-2-1 ready phase before the match
+    // Curated chomper colour palette players can pick in setup
+    colours: ["#8bdfff", "#d6a486", "#f5cd6b", "#9cf3a0", "#f07f8b", "#b79cff"],
+    // Item/chomper sizes are scaled down in duel so the two halves don't clash
+    itemScale: 0.78,         // multiply item widths by this in duel
+    chomperScale: 0.82,      // multiply chomper width by this in duel
+    spawnGapMul: 1.15,       // slightly slower spawns in duel (less clutter)
     // Layout: "auto" picks side-by-side on landscape (laptop) and top/bottom
     // on portrait (phone). Force with "sideBySide" or "topBottom".
     layout: "auto",
+  },
+
+  // ----- ABILITIES (secret tactical layer; 2 charges each, PRD section 3) -----
+  ABILITIES: {
+    charges: 2,              // charges per player per match
+    lockoutSeconds: 6,       // min gap between a player's activations
+    incomingSeconds: 0.5,    // universal "incoming" cue before the effect lands
+    pool: [
+      { id: "gravity", name: "Gravity Surge", duration: 2.5, speedMul: 1.2,
+        desc: "Rival's items fall 20% faster." },
+      { id: "flip",    name: "Control Flip",  duration: 1.25,
+        desc: "Rival's left/right is reversed." },
+      { id: "sidewind",name: "Sidewind",      duration: 3.0, driftFrac: 0.08,
+        desc: "Rival's items drift sideways." },
+      { id: "shrink",  name: "Chomper Shrink",duration: 3.0, widthMul: 0.85,
+        desc: "Rival's catcher shrinks 15%." },
+    ],
   },
 
   // ----- WARM-UP (zero-friction first seconds; F2) -----
@@ -110,6 +141,18 @@ const CONFIG = {
     trophy:      "assets/trophy.png",
   },
 };
+
+/*** Small deterministic PRNG (mulberry32). Seeded so a duel produces the
+ * identical item schedule for both lanes — fairness per the PRD. ***/
+function makeRng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 /*** Device storage for profiles, score history and the leaderboard.
  * Everything is wrapped in try/catch so the game still works if storage is
@@ -272,6 +315,7 @@ class Game {
     this.returnTo = 'start';          // where screens like register/leaderboard return
     this.duelNames = ['', ''];        // names typed on the duel setup screen
     this.duelNameActive = 0;          // which name field is focused (0 or 1)
+    this.duelColours = [CONFIG.THEME.p1, CONFIG.THEME.p2]; // chosen chomper colours
 
     // Effects
     this.effects = {};                // active power-ups: effect -> { timeLeft, duration, icon }
@@ -519,7 +563,7 @@ class Game {
     return {
       index,
       name: name || (index === 0 ? 'P1' : 'P2'),
-      color: index === 0 ? t.p1 : t.p2,
+      color: (this.duelColours && this.duelColours[index]) || (index === 0 ? t.p1 : t.p2),
       score: 0,
       lives: CONFIG.DUEL.lives,
       x: CONFIG.CANVAS_WIDTH / 2,
@@ -572,7 +616,40 @@ class Game {
     this.roundElapsed = 0;
     this.shakeTime = 0;
     this.duelWinner = null;
-    this.state = 'duelPlaying';
+
+    // Seeded, mirrored spawner: one RNG drives the shared schedule for both
+    // lanes so neither player gets luckier drops.
+    this.duelSeed = (Date.now() & 0xffffffff) >>> 0;
+    this.duelRng = makeRng(this.duelSeed);
+
+    // Assign one secret ability to each player (equal weight) + charges
+    if (CONFIG.FEATURES.abilities) this.assignAbilities();
+
+    // Begin with the 3-2-1 ready phase (or straight to play if disabled)
+    if (CONFIG.FEATURES.countdown) {
+      this.countdownLeft = CONFIG.DUEL.countdownSeconds;
+      this.state = 'duelCountdown';
+    } else {
+      this.countdownLeft = 0;
+      this.state = 'duelPlaying';
+    }
+  }
+
+  /*** Assign a random ability to each player and reset charge/cooldown/effect
+   * state. Each player's own ability is known to them; the opponent sees only
+   * a generic mystery indicator (handled at render time). ***/
+  assignAbilities() {
+    const pool = CONFIG.ABILITIES.pool;
+    for (const p of this.players) {
+      p.ability = pool[Math.floor(Math.random() * pool.length)];
+      p.charges = CONFIG.ABILITIES.charges;
+      p.abilityLockout = 0;      // seconds until they can activate again
+      p.incoming = 0;            // seconds left of the pre-attack cue (on target)
+      p.effect = null;           // active hostile effect on THIS player
+      p.effectLeft = 0;          // seconds left of that effect
+      p.pendingFrom = null;      // attacker index while incoming cue plays
+      p.pendingAbility = null;   // ability that will land when cue ends
+    }
   }
 
   /*** End a duel: decide the winner, record both players' games.
@@ -630,6 +707,30 @@ class Game {
       this.duelNames[i] += k;
       e.preventDefault();
     }
+  }
+
+  /*** Activate attacker's ability against the rival. Enforces charges,
+   * lockout, and the no-stacking rule. Starts a short "incoming" cue on the
+   * target; the effect lands when the cue ends. Returns true if it fired. ***/
+  activateAbility(attackerIndex) {
+    if (!CONFIG.FEATURES.abilities) return false;
+    if (this.state !== 'duelPlaying') return false;
+    const attacker = this.players[attackerIndex];
+    const target = this.players[attackerIndex === 0 ? 1 : 0];
+    if (!attacker || !attacker.ability) return false;
+    if (attacker.charges <= 0) return false;
+    if (attacker.abilityLockout > 0) return false;
+    // No stacking: if the target already has (or is about to get) an effect,
+    // block without consuming a charge.
+    if (target.effect || target.incoming > 0) return false;
+
+    attacker.charges -= 1;
+    attacker.abilityLockout = CONFIG.ABILITIES.lockoutSeconds;
+    target.incoming = CONFIG.ABILITIES.incomingSeconds;
+    target.pendingAbility = attacker.ability;
+    target.pendingFrom = attackerIndex;
+    this.sfxPower();
+    return true;
   }
 
   /*** Replay the duel with the same two players. ***/
@@ -719,6 +820,11 @@ class Game {
       if (k === 'ArrowLeft')  { this.keysDown['p2left'] = true;  this.keysDown['left'] = true;  e.preventDefault(); }
       if (k === 'ArrowRight') { this.keysDown['p2right'] = true; this.keysDown['right'] = true; e.preventDefault(); }
 
+      // Secret ability triggers: Z = Player 1, X = Player 2. Fire once per
+      // press (guard against auto-repeat while the key is held).
+      if ((k === 'z' || k === 'Z') && !this._zHeld) { this._zHeld = true; this.activateAbility(0); e.preventDefault(); }
+      if ((k === 'x' || k === 'X') && !this._xHeld) { this._xHeld = true; this.activateAbility(1); e.preventDefault(); }
+
       // Pause toggle (both modes)
       if (k === 'p' || k === 'P') {
         if (this.state === 'playing' || this.state === 'duelPlaying' || this.state === 'paused') {
@@ -751,6 +857,8 @@ class Game {
       if (k === 'd' || k === 'D') { this.keysDown['p1right'] = false; this.keysDown['right'] = false; }
       if (k === 'ArrowLeft')  { this.keysDown['p2left'] = false;  this.keysDown['left'] = false; }
       if (k === 'ArrowRight') { this.keysDown['p2right'] = false; this.keysDown['right'] = false; }
+      if (k === 'z' || k === 'Z') this._zHeld = false;
+      if (k === 'x' || k === 'X') this._xHeld = false;
     };
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
@@ -798,6 +906,11 @@ class Game {
           return;
         case 'duelSetup': {
           const rects = this.duelNameRects || [];
+          // colour swatches
+          const cr = this.duelColourRects || [[], []];
+          for (let pi = 0; pi < 2; pi++) {
+            for (const s of cr[pi]) { if (inRect(s, px, py)) { this.duelColours[pi] = s.col; return; } }
+          }
           if (inRect(rects[0], px, py)) this.duelNameActive = 0;
           else if (inRect(rects[1], px, py)) this.duelNameActive = 1;
           else if (inRect(this.duelStartRect, px, py)) this.beginDuelFromSetup();
@@ -818,8 +931,14 @@ class Game {
           if (inRect(this.duelRematchRect, px, py)) this.startDuel();
           else if (inRect(this.duelMenuRect, px, py)) this.toMenu();
           return;
+        case 'duelCountdown':
+          return; // ignore taps during the ready phase
         case 'duelPlaying': {
-          // Each touch controls the basket in the half it belongs to.
+          // Ability buttons take priority over movement
+          const ab = this.abilityButtons || [null, null];
+          if (inRect(ab[0], px, py)) { this.activateAbility(0); return; }
+          if (inRect(ab[1], px, py)) { this.activateAbility(1); return; }
+          // Otherwise this touch controls the basket in its half.
           const half = this.duelHalfAt(px, py);
           this.duelPointers[e.pointerId] = half;
           this._duelPointerMove(half, px, py);
@@ -867,16 +986,24 @@ class Game {
   update(dt) {
     this.elapsed += dt; // drives pulsing/bounce animations
 
-    // Menu-like screens animate decorative fallers only
+    // Menu-like screens animate decorative fallers only (unless reduced motion)
     if (this.state === 'start' || this.state === 'menu' ||
         this.state === 'register' || this.state === 'leaderboard' ||
         this.state === 'duelSetup') {
-      for (const d of this.decor) { d.y += d.speed * dt; d.spin += dt; }
-      this.decor = this.decor.filter(d => d.y - d.h / 2 <= CONFIG.CANVAS_HEIGHT);
-      while (this.decor.length < 6) this.spawnDecor(false);
+      if (!CONFIG.FEATURES.reducedMotion) {
+        for (const d of this.decor) { d.y += d.speed * dt; d.spin += dt; }
+        this.decor = this.decor.filter(d => d.y - d.h / 2 <= CONFIG.CANVAS_HEIGHT);
+        while (this.decor.length < 6) this.spawnDecor(false);
+      }
       return;
     }
 
+    // Duel countdown: tick down the 3-2-1 ready phase, then play
+    if (this.state === 'duelCountdown') {
+      this.countdownLeft -= dt;
+      if (this.countdownLeft <= 0) this.state = 'duelPlaying';
+      return;
+    }
     // Duel has its own update path
     if (this.state === 'duelPlaying') { this.updateDuel(dt); return; }
     if (this.state === 'duelOver') return;
@@ -1075,19 +1202,39 @@ class Game {
     const speed = CONFIG.PLAYER.speed;
     const [p1, p2] = this.players;
 
+    // Ability timers: lockout, incoming cue (lands the effect), active effect
+    if (CONFIG.FEATURES.abilities) {
+      for (const p of this.players) {
+        if (p.abilityLockout > 0) p.abilityLockout = Math.max(0, p.abilityLockout - dt);
+        if (p.incoming > 0) {
+          p.incoming = Math.max(0, p.incoming - dt);
+          if (p.incoming === 0 && p.pendingAbility) {
+            p.effect = p.pendingAbility;         // effect lands on this player
+            p.effectLeft = p.pendingAbility.duration;
+            p.pendingAbility = null; p.pendingFrom = null;
+          }
+        }
+        if (p.effectLeft > 0) {
+          p.effectLeft = Math.max(0, p.effectLeft - dt);
+          if (p.effectLeft === 0) p.effect = null;
+        }
+      }
+    }
+
     // Keyboard movement. p1 = A/D, p2 = arrows. In side-by-side both move
     // left/right normally. In top/bottom, p2 is rotated so we flip them.
-    const z2 = this.duelZone(1);
+    // "Control Flip" ability reverses the affected player's direction.
     const moveAlong = (player, zone, neg, pos) => {
       let d = 0;
       if (this.keysDown[neg]) d -= 1;
       if (this.keysDown[pos]) d += 1;
       if (zone.rotated) d = -d; // rotated view: invert control direction
+      if (player.effect && player.effect.id === 'flip') d = -d;
       player.pos = Math.max(zone.min, Math.min(zone.max, (player.pos ?? player.x) + d * speed * dt));
       player.x = player.pos;
     };
     moveAlong(p1, this.duelZone(0), 'p1left', 'p1right');
-    moveAlong(p2, z2, 'p2left', 'p2right');
+    moveAlong(p2, this.duelZone(1), 'p2left', 'p2right');
 
     // Decay per-player + shared timers
     for (const p of this.players) {
@@ -1104,28 +1251,43 @@ class Game {
     if (this.timeLeft <= 0) { this.timeLeft = 0; this.duelOver(); return; }
     if (p1.lives <= 0 || p2.lives <= 0) { this.duelOver(); return; }
 
-    // Spawn one item per player per interval
+    // Seeded, mirrored spawn: one draw feeds both lanes identically
     const progress = 1 - (this.timeLeft / CONFIG.DUEL.roundSeconds);
-    const curInterval = CONFIG.RULES.spawnIntervalStart +
-      (CONFIG.RULES.spawnIntervalEnd - CONFIG.RULES.spawnIntervalStart) * progress;
+    const curInterval = (CONFIG.RULES.spawnIntervalStart +
+      (CONFIG.RULES.spawnIntervalEnd - CONFIG.RULES.spawnIntervalStart) * progress)
+      * CONFIG.DUEL.spawnGapMul;
     this.spawnTimer += dt;
     while (this.spawnTimer >= curInterval) {
       this.spawnTimer -= curInterval;
-      this.spawnDuelItem(0);
-      this.spawnDuelItem(1);
+      this.spawnDuelPair();
     }
 
     // Move + collide fallers (always fall vertically toward the basket row)
     const rampMul = 1 + (CONFIG.RULES.fallSpeedRampMax - 1) * progress;
     const H = CONFIG.CANVAS_HEIGHT;
+    const W = CONFIG.CANVAS_WIDTH;
     for (let i = this.fallers.length - 1; i >= 0; i--) {
       const f = this.fallers[i];
       const zone = this.duelZone(f.half);
-      f.y += f.speed * rampMul * dt * zone.fallDir;
+      const player = this.players[f.half];
+      const eff = player.effect;
+      // Gravity Surge: items in this lane fall faster
+      const gravMul = (eff && eff.id === 'gravity') ? eff.speedMul : 1;
+      f.y += f.speed * rampMul * gravMul * dt * zone.fallDir;
+      // Sidewind: gentle horizontal drift, capped to the zone width fraction
+      if (eff && eff.id === 'sidewind') {
+        f.drift = (f.drift || 0) + dt;
+        const amp = (W / 2) * eff.driftFrac;
+        f.x += Math.sin(f.drift * 3) * amp * dt * 2;
+        const lo = zone.spawnMin + f.w / 2, hi = zone.spawnMax - f.w / 2;
+        f.x = Math.max(lo, Math.min(hi, f.x));
+      }
       if (f.def.type === 'good') f.spin += dt * 2; else f.wobblePhase += dt * 6;
 
-      const player = this.players[f.half];
-      const bHalfW = (CONFIG.PLAYER.width * 0.7) / 2;
+      // Chomper Shrink: reduce catch width (never below 70% per PRD)
+      const shrinkMul = (eff && eff.id === 'shrink') ? eff.widthMul : 1;
+      const catchW = CONFIG.PLAYER.width * CONFIG.DUEL.chomperScale * shrinkMul;
+      const bHalfW = (catchW * 0.7) / 2;
       const iHalfW = (f.w * 0.7) / 2, iHalfH = (f.h * 0.7) / 2;
       const overlapX = Math.abs(f.x - player.x) < (bHalfW + iHalfW);
       const overlapY = Math.abs(f.y - zone.fixed) < (iHalfH + 26);
@@ -1168,23 +1330,33 @@ class Game {
     return py >= CONFIG.CANVAS_HEIGHT / 2 ? 0 : 1; // bottom = p1, top = p2
   }
 
-  /*** Spawn one star/bomb into a given player's zone. ***/
-  spawnDuelItem(half) {
-    const zone = this.duelZone(half);
+  /*** Spawn one seeded item into BOTH lanes at once (mirrored). Uses the duel
+   * RNG so the schedule is identical and fair for both players. The relative
+   * position within each zone is the same fraction (mirrored horizontally for
+   * player 2 so the two lanes look symmetric). ***/
+  spawnDuelPair() {
+    const rng = this.duelRng || Math.random;
     const pool = CONFIG.items.filter(it => it.type === 'good' || it.type === 'bad');
     const tw = pool.reduce((s, it) => s + it.weight, 0);
-    let r = Math.random() * tw, def = pool[pool.length - 1];
+    let r = rng() * tw, def = pool[pool.length - 1];
     for (const it of pool) { r -= it.weight; if (r <= 0) { def = it; break; } }
+    const frac = rng();   // 0..1 position across the zone
+    const speed = CONFIG.RULES.fallSpeedMin + rng() * (CONFIG.RULES.fallSpeedMax - CONFIG.RULES.fallSpeedMin);
+    const wob = rng() * Math.PI * 2;
+    this._spawnDuelInto(0, def, frac, speed, wob);
+    this._spawnDuelInto(1, def, 1 - frac, speed, wob); // mirror for symmetry
+  }
+
+  /*** Place one item in a lane given a shared def/fraction/speed. ***/
+  _spawnDuelInto(half, def, frac, speed, wob) {
+    const zone = this.duelZone(half);
     const img = this.assets.items[def.name];
-    const w = def.width;
+    const w = def.width * CONFIG.DUEL.itemScale;
     const h = (img.naturalHeight / img.naturalWidth) * w;
-    // x within the zone's spawn range, clamped so the sprite stays on screen
     const lo = zone.spawnMin + w / 2, hi = zone.spawnMax - w / 2;
-    const x = Math.max(w / 2, Math.min(CONFIG.CANVAS_WIDTH - w / 2, lo + Math.random() * Math.max(1, hi - lo)));
-    const speed = CONFIG.RULES.fallSpeedMin +
-      Math.random() * (CONFIG.RULES.fallSpeedMax - CONFIG.RULES.fallSpeedMin);
+    const x = Math.max(w / 2, Math.min(CONFIG.CANVAS_WIDTH - w / 2, lo + frac * Math.max(1, hi - lo)));
     const y = zone.fallDir > 0 ? -h / 2 : CONFIG.CANVAS_HEIGHT + h / 2;
-    this.fallers.push({ def, img, w, h, x, y, speed, spin: 0, wobblePhase: Math.random() * Math.PI * 2, half });
+    this.fallers.push({ def, img, w, h, x, y, speed, spin: 0, wobblePhase: wob, half, drift: 0 });
   }
 
   render() {
@@ -1201,6 +1373,7 @@ class Game {
     if (this.state === 'register') { this.renderRegister(ctx, w, h); return; }
     if (this.state === 'duelSetup') { this.renderDuelSetup(ctx, w, h); return; }
     if (this.state === 'leaderboard') { this.renderLeaderboard(ctx, w, h); return; }
+    if (this.state === 'duelCountdown') { this.renderDuel(ctx, w, h); this.renderDuelCountdown(ctx, w, h); return; }
     if (this.state === 'duelPlaying' || this.state === 'duelOver') { this.renderDuel(ctx, w, h); return; }
 
     // Screen shake: offset the whole world while shakeTime is active
@@ -1377,6 +1550,51 @@ class Game {
     return { x, y, w: bw, h: bh };
   }
 
+  /*** Draw the original "chomper" character: a round glowing body with an
+   * animated wedge mouth that opens/closes, plus a small eye. Faces the
+   * direction items come from. Original silhouette (not Pac-Man art). ***/
+  drawChomper(ctx, cx, cy, radius, color, opts = {}) {
+    const facing = opts.facing || 'up'; // mouth opens toward incoming items
+    const t = (opts.phase ?? this.elapsed);
+    // Mouth opens 6°..34° on a gentle cycle; snaps wider briefly on catch
+    const base = 0.10 + 0.22 * (0.5 + 0.5 * Math.sin(t * 6));
+    const open = Math.min(0.9, base + (opts.snap || 0));
+    const ang = Math.PI * open; // half-angle of the mouth wedge
+    // Rotation so the mouth points the right way
+    const rot = facing === 'up' ? -Math.PI / 2
+      : facing === 'down' ? Math.PI / 2
+      : facing === 'left' ? Math.PI : 0;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(rot);
+    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = color; ctx.shadowBlur = 16; }
+
+    // Body with mouth wedge cut out
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, radius, ang, Math.PI * 2 - ang, false);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(5,10,19,0.6)';
+    ctx.stroke();
+
+    // Eye (original treatment: small ice-white dot with dark pupil)
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(radius * 0.1, -radius * 0.42, radius * 0.17, 0, Math.PI * 2);
+    ctx.fillStyle = '#ddeeff';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(radius * 0.14, -radius * 0.42, radius * 0.08, 0, Math.PI * 2);
+    ctx.fillStyle = '#050a13';
+    ctx.fill();
+
+    ctx.restore();
+  }
+
   /*** Branded loading screen: dark background, title, progress bar.
    * Falls back to plain "Loading..." when FEATURES.fastLoad is off. ***/
   renderLoader(ctx, w, h) {
@@ -1494,14 +1712,16 @@ class Game {
     if (CONFIG.FEATURES.duel) {
       this.menuButtons.duel = this.drawButton(ctx, 'Duel (2 players)', cx, h * 0.50, 240, 60, CONFIG.THEME.p2);
     }
-    this.menuButtons.leaderboard = this.drawButton(ctx, 'Leaderboard', cx, h * 0.62, 240, 56, CONFIG.THEME.moonlight);
+    // Global Arena — honest "Coming Soon" (no real backend yet)
+    this.drawButton(ctx, 'Global Arena — Coming Soon', cx, h * 0.61, 260, 50, 'rgba(221,238,255,0.25)');
+    this.menuButtons.leaderboard = this.drawButton(ctx, 'Leaderboard', cx, h * 0.70, 240, 52, CONFIG.THEME.moonlight);
     if (CONFIG.FEATURES.profiles) {
-      this.menuButtons.register = this.drawButton(ctx, 'Register player', cx, h * 0.73, 240, 56, CONFIG.THEME.moonlight);
+      this.menuButtons.register = this.drawButton(ctx, 'Register player', cx, h * 0.80, 240, 52, CONFIG.THEME.moonlight);
     }
 
     // Duel hint
-    this.drawText(ctx, 'Duel: P1 = A / D   •   P2 = ← / →', cx, h * 0.85, 17, CONFIG.BRAND.main);
-    this.drawText(ctx, 'On phone, sit on opposite sides.', cx, h * 0.885, 15, CONFIG.THEME.moonlight);
+    this.drawText(ctx, 'Duel: P1 = A / D + Z   •   P2 = ← / → + X', cx, h * 0.88, 16, CONFIG.BRAND.main);
+    this.drawText(ctx, 'Laptop: side by side. Phone: top & bottom.', cx, h * 0.91, 14, CONFIG.THEME.moonlight);
 
     this.renderSpeaker(ctx, w, h);
   }
@@ -1565,17 +1785,36 @@ class Game {
       this.duelNameRects[idx] = { x: bx, y: by, w: bw, h: bh };
     };
 
-    drawField(0, 'Player 1  (A / D)', 0.34, t.p1);
-    drawField(1, 'Player 2  (← / →)', 0.50, t.p2);
+    drawField(0, 'Player 1  (A / D + Z)', 0.30, this.duelColours[0]);
+    drawField(1, 'Player 2  (← / → + X)', 0.52, this.duelColours[1]);
 
-    const layoutLabel = this.duelLayout() === 'sideBySide'
-      ? 'Laptop: side-by-side screen'
-      : 'Phone: split screen, sit opposite';
-    this.drawText(ctx, layoutLabel, cx, h * 0.60, 16, t.moonlight);
+    // Colour swatch rows (one per player), stored as hitboxes
+    this.duelColourRects = [[], []];
+    const cols = CONFIG.DUEL.colours;
+    const drawSwatches = (idx, yFrac) => {
+      const sw = 30, gap = 10, total = cols.length * sw + (cols.length - 1) * gap;
+      let sx = cx - total / 2;
+      const sy = h * yFrac;
+      cols.forEach((col) => {
+        const sel = this.duelColours[idx] === col;
+        ctx.save();
+        if (CONFIG.FEATURES.neonTheme && sel) { ctx.shadowColor = col; ctx.shadowBlur = 14; }
+        ctx.beginPath(); ctx.arc(sx + sw / 2, sy, sw / 2, 0, Math.PI * 2);
+        ctx.fillStyle = col; ctx.fill();
+        ctx.lineWidth = sel ? 3 : 1;
+        ctx.strokeStyle = sel ? CONFIG.BRAND.main : 'rgba(221,238,255,0.3)';
+        ctx.stroke();
+        ctx.restore();
+        this.duelColourRects[idx].push({ x: sx, y: sy - sw / 2, w: sw, h: sw, col });
+        sx += sw + gap;
+      });
+    };
+    drawSwatches(0, 0.40);
+    drawSwatches(1, 0.62);
 
-    this.duelStartRect = this.drawButton(ctx, 'Start Duel', cx, h * 0.72, 220, 60, t.cyan);
-    this.duelSetupBackRect = this.drawButton(ctx, 'Back', cx, h * 0.83, 160, 50, t.moonlight);
-    this.drawText(ctx, 'Tip: Tab switches fields, Enter confirms', cx, h * 0.90, 14, CONFIG.BRAND.main);
+    this.duelStartRect = this.drawButton(ctx, 'Start Duel', cx, h * 0.74, 220, 56, t.moonlight);
+    this.duelSetupBackRect = this.drawButton(ctx, 'Back', cx, h * 0.84, 160, 48, t.p2);
+    this.drawText(ctx, 'Tab switches fields · pick a chomper colour', cx, h * 0.91, 13, CONFIG.BRAND.main);
     this.renderSpeaker(ctx, w, h);
   }
 
@@ -1635,12 +1874,43 @@ class Game {
 
     // Shared timer: centre for phone, top-centre for laptop (both upright)
     const secs = Math.ceil(this.timeLeft);
-    const tCol = secs <= 10 ? '#ff6b6b' : CONFIG.THEME.cyan;
+    const tCol = secs <= 10 ? CONFIG.THEME.coral : CONFIG.THEME.moonlight;
     if (sideBySide) this.drawText(ctx, String(secs), w / 2, 28, 30, tCol);
     else this.drawText(ctx, String(secs), w / 2, h / 2, 30, tCol);
 
+    // On-screen ability buttons (touch). One per half; P2's is rotated.
+    this.abilityButtons = [null, null];
+    if (CONFIG.FEATURES.abilities && this.state === 'duelPlaying') {
+      for (let i = 0; i < 2; i++) this._drawAbilityButton(ctx, i, w, h, sideBySide);
+    }
+
     if (this.state === 'duelOver') this.renderDuelOver(ctx, w, h);
     else this.renderSpeaker(ctx, w, h);
+  }
+
+  /*** Draw a player's on-screen ability button and store its hitbox (in raw
+   * canvas coords, accounting for the rotated half). ***/
+  _drawAbilityButton(ctx, index, w, h, sideBySide) {
+    const p = this.players[index];
+    if (!p || !p.ability) return;
+    const r = 30;
+    // Place near the player's inner-bottom corner
+    let cx, cy;
+    if (sideBySide) { cx = index === 0 ? w * 0.5 - 48 : w * 0.5 + 48; cy = h - 60; }
+    else { cx = w - 56; cy = index === 0 ? h - 60 : 60; }
+    const ready = p.charges > 0 && p.abilityLockout === 0;
+    const col = ready ? p.color : 'rgba(221,238,255,0.25)';
+    ctx.save();
+    // Rotate the glyph for the top player so it faces them
+    const zone = this.duelZone(index);
+    if (zone.rotated) { ctx.translate(cx, cy); ctx.rotate(Math.PI); ctx.translate(-cx, -cy); }
+    if (CONFIG.FEATURES.neonTheme && ready) { ctx.shadowColor = p.color; ctx.shadowBlur = 14; }
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(10,20,40,0.85)'; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = col; ctx.stroke();
+    ctx.restore();
+    this.drawText(ctx, ready ? '★' : '·', cx, cy, 22, col);
+    this.abilityButtons[index] = { x: cx - r, y: cy - r, w: r * 2, h: r * 2 };
   }
 
   /*** Draw one duel player's zone: items, basket, HUD. Clipped to the zone.
@@ -1704,34 +1974,113 @@ class Game {
       ctx.restore();
     }
 
-    // Basket at the zone's fixed row, with a coloured glow
-    const img = this.assets.basket;
+    // Catcher at the zone's fixed row. Draw the original chomper character
+    // (or fall back to the basket image if the chomper feature is off).
     const sq = player.squash / 0.1 || 0;
-    const bwid = CONFIG.PLAYER.width * (1 + 0.18 * sq);
-    const bhei = (img.naturalHeight / img.naturalWidth) * bwid * (1 - 0.22 * sq);
-    const by = zone.fixed - bhei / 2;
-    ctx.save();
-    if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = player.color; ctx.shadowBlur = 18; }
-    ctx.drawImage(img, player.x - bwid / 2, by, bwid, bhei);
-    ctx.restore();
+    const shrinkMul = (player.effect && player.effect.id === 'shrink') ? player.effect.widthMul : 1;
+    const catchW = CONFIG.PLAYER.width * CONFIG.DUEL.chomperScale * shrinkMul;
+    if (CONFIG.FEATURES.chomper) {
+      const radius = (catchW / 2) * (1 + 0.12 * sq);
+      // Mouth opens toward the incoming items (up for bottom player, down when rotated handled by view)
+      this.drawChomper(ctx, player.x, zone.fixed, radius, player.color,
+        { facing: 'up', snap: sq * 0.5 });
+    } else {
+      const img = this.assets.basket;
+      const bwid = catchW * (1 + 0.18 * sq);
+      const bhei = (img.naturalHeight / img.naturalWidth) * bwid * (1 - 0.22 * sq);
+      ctx.save();
+      if (CONFIG.FEATURES.neonTheme) { ctx.shadowColor = player.color; ctx.shadowBlur = 18; }
+      ctx.drawImage(img, player.x - bwid / 2, zone.fixed - bhei / 2, bwid, bhei);
+      ctx.restore();
+    }
+
+    // Incoming attack cue: a brief directional flash across this lane
+    if (player.incoming > 0) {
+      const a = 0.35 * (player.incoming / CONFIG.ABILITIES.incomingSeconds);
+      ctx.fillStyle = `rgba(240,127,139,${a})`;
+      if (sideBySide) ctx.fillRect(index === 0 ? 0 : w / 2, 0, w / 2, h);
+      else ctx.fillRect(0, index === 0 ? h / 2 : 0, w, h / 2);
+      this.drawText(ctx, 'INCOMING!', player.x, zone.fixed - 70, 20, CONFIG.THEME.coral);
+    }
+    // Active effect label so the target understands the change
+    if (player.effect) {
+      this.drawText(ctx, player.effect.name.toUpperCase(), player.x, zone.fixed - 70, 18, CONFIG.THEME.coral);
+    }
 
     // Per-player HUD near the far (outer) edge of their zone
-    let nameX, nameY, scoreY, livesX, livesY;
+    let hudX, hudY;
     if (sideBySide) {
-      nameX = index === 0 ? 14 : w / 2 + 14;
-      nameY = h - 70; scoreY = h - 44;
-      livesX = index === 0 ? w / 2 - 14 : w - 14; livesY = h - 58;
-      this.drawText(ctx, player.name, nameX, nameY, 18, player.color, 'left');
-      this.drawText(ctx, `Score ${player.score}`, nameX, scoreY, 22, CONFIG.BRAND.main, 'left');
-      this.drawText(ctx, '♥'.repeat(Math.max(0, player.lives)), livesX, livesY, 20, '#ff6b8b', 'right');
+      hudX = index === 0 ? 14 : w / 2 + 14;
+      this.drawText(ctx, player.name, hudX, h - 82, 18, player.color, 'left');
+      this.drawText(ctx, `Score ${player.score}`, hudX, h - 56, 22, CONFIG.BRAND.main, 'left');
+      this.drawText(ctx, '♥'.repeat(Math.max(0, player.lives)),
+        index === 0 ? w / 2 - 14 : w - 14, h - 70, 20, CONFIG.THEME.coral, 'right');
+      hudY = h - 30;
     } else {
       const baseY = index === 0 ? (h / 2 + 8) : (h / 2 - 8);
       this.drawText(ctx, player.name, 14, baseY + 14, 20, player.color, 'left');
       this.drawText(ctx, `Score ${player.score}`, 14, baseY + 42, 24, CONFIG.BRAND.main, 'left');
-      this.drawText(ctx, '♥'.repeat(Math.max(0, player.lives)), w - 14, baseY + 20, 22, '#ff6b8b', 'right');
+      this.drawText(ctx, '♥'.repeat(Math.max(0, player.lives)), w - 14, baseY + 20, 22, CONFIG.THEME.coral, 'right');
+      hudY = baseY + 70;
+    }
+
+    // Ability HUD: the owner sees their ability name + charge pips.
+    if (CONFIG.FEATURES.abilities && player.ability) {
+      this.drawText(ctx, player.ability.name, hudX ?? 14, hudY, 15, player.color, 'left');
+      // charge pips
+      const pipX0 = (hudX ?? 14);
+      for (let c = 0; c < CONFIG.ABILITIES.charges; c++) {
+        const filled = c < player.charges;
+        ctx.save();
+        if (CONFIG.FEATURES.neonTheme && filled) { ctx.shadowColor = player.color; ctx.shadowBlur = 10; }
+        ctx.beginPath();
+        ctx.arc(pipX0 + 8 + c * 20, hudY + 20, 7, 0, Math.PI * 2);
+        ctx.fillStyle = filled ? player.color : 'rgba(221,238,255,0.2)';
+        ctx.fill();
+        ctx.restore();
+      }
+      // Lockout hint
+      if (player.abilityLockout > 0) {
+        this.drawText(ctx, `${Math.ceil(player.abilityLockout)}s`, pipX0 + 8 + CONFIG.ABILITIES.charges * 20 + 6, hudY + 20, 13, 'rgba(221,238,255,0.6)', 'left');
+      }
+      // The rival's mystery indicator is shown in the opponent's own oriented
+      // HUD only (we don't reveal the type), so nothing else to draw here.
     }
 
     ctx.restore();
+  }
+
+  /*** DUEL COUNTDOWN overlay: 3-2-1, plus each player's secret ability card
+   * shown only in their own oriented half (casual social privacy). ***/
+  renderDuelCountdown(ctx, w, h) {
+    const sideBySide = this.duelLayout() === 'sideBySide';
+    ctx.fillStyle = 'rgba(5,10,19,0.72)';
+    ctx.fillRect(0, 0, w, h);
+
+    // Per-player ability reveal in their own oriented region
+    for (let i = 0; i < 2; i++) {
+      const p = this.players[i];
+      if (!CONFIG.FEATURES.abilities || !p.ability) continue;
+      ctx.save();
+      const zone = this.duelZone(i);
+      if (zone.rotated) { ctx.translate(w / 2, h / 4); ctx.rotate(Math.PI); ctx.translate(-w / 2, -h / 4); }
+      let cx, cy;
+      if (sideBySide) { cx = i === 0 ? w * 0.25 : w * 0.75; cy = h * 0.4; }
+      else { cx = w / 2; cy = i === 0 ? h * 0.72 : h * 0.28; }
+      this.drawText(ctx, p.name, cx, cy - 54, 20, p.color);
+      this.drawText(ctx, 'Your ability', cx, cy - 26, 15, CONFIG.BRAND.main);
+      this.drawText(ctx, p.ability.name, cx, cy + 4, 24, p.color);
+      this.drawText(ctx, p.ability.desc, cx, cy + 34, 13, CONFIG.BRAND.main);
+      this.drawText(ctx, `${CONFIG.ABILITIES.charges} charges`, cx, cy + 58, 14, CONFIG.THEME.gold);
+      ctx.restore();
+    }
+
+    // Big 3-2-1 in the middle
+    const n = Math.ceil(this.countdownLeft);
+    const pulse = 1 + 0.2 * (1 - (this.countdownLeft % 1));
+    this.drawText(ctx, String(n), w / 2, h / 2, 72 * pulse, CONFIG.THEME.moonlight);
+    const keys = sideBySide ? 'P1: A/D + Z    P2: ←/→ + X' : 'Drag your half · tap your ability button';
+    this.drawText(ctx, keys, w / 2, h / 2 + 70, 15, CONFIG.BRAND.main);
   }
 
   /*** DUEL OVER overlay: teases the winner over the loser. ***/
@@ -1766,8 +2115,14 @@ class Game {
     this.drawText(ctx, `${p2.name}`, cx + 90, cy - 40, 20, p2.color);
     this.drawText(ctx, `${p2.score}`, cx + 90, cy, 40, CONFIG.BRAND.main);
 
-    this.duelRematchRect = this.drawButton(ctx, 'Rematch', cx, cy + 90, 200, 58, CONFIG.THEME.cyan);
-    this.duelMenuRect = this.drawButton(ctx, 'Menu', cx, cy + 160, 160, 50, CONFIG.THEME.moonlight);
+    // Lives + ability usage summary
+    const max = CONFIG.ABILITIES.charges;
+    const used = p => CONFIG.FEATURES.abilities ? (max - (p.charges ?? max)) : 0;
+    this.drawText(ctx, `♥ ${Math.max(0, p1.lives)}   ability ${used(p1)}/${max}`, cx - 90, cy + 38, 14, CONFIG.BRAND.main);
+    this.drawText(ctx, `♥ ${Math.max(0, p2.lives)}   ability ${used(p2)}/${max}`, cx + 90, cy + 38, 14, CONFIG.BRAND.main);
+
+    this.duelRematchRect = this.drawButton(ctx, 'Rematch', cx, cy + 100, 200, 58, CONFIG.THEME.moonlight);
+    this.duelMenuRect = this.drawButton(ctx, 'Menu', cx, cy + 168, 160, 50, CONFIG.THEME.p2);
   }
 
   /*** Coach mark: a "Drag to move" hint with an animated arrow, shown on the

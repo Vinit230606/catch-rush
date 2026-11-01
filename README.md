@@ -8,17 +8,35 @@ Double-click `index.html` to open it in a browser (works from a `file://` URL, n
 
 ## Modes
 
-- Classic: single-player, 45 seconds, beat your best.
-- Duel (local 2-player): enter both names, then play.
-  - Laptop (landscape): the screen splits left/right, both sides upright.
-    Player 1 uses A / D (left side), Player 2 uses the arrow keys (right side).
-  - Phone (portrait): the screen splits top/bottom and the top half is rotated
-    180° so two people facing each other both see their side upright. Each player
-    drags in their own half.
-  - Highest score when the timer ends wins (a knockout ends it early). The winner
-    gets teased over the loser.
-  - The layout is chosen automatically from the window orientation; force it with
+- Solo Survival (Classic): single-player, 45 seconds, 3 lives, beat your best.
+- Local Duel (2-player): enter names, pick a chomper colour, then play.
+  - Laptop (landscape): screen splits left/right, both sides upright.
+    Player 1 = A / D + Z (ability), Player 2 = arrows + X (ability).
+  - Phone (portrait): screen splits top/bottom; the top half is rotated 180° so
+    two people facing each other both see their side upright. Each player drags in
+    their own half and taps their on-screen ability button.
+  - Both lanes use the same seeded item schedule, so neither player gets luckier
+    drops. Highest score when the timer ends wins; equal scores are a draw. A
+    knockout (out of lives) ends it early. The winner gets teased over the loser.
+  - Layout auto-detects from orientation; force it with
     `CONFIG.DUEL.layout = "sideBySide"` or `"topBottom"`.
+- Global Arena: shown as "Coming Soon". Real online multiplayer needs a backend
+  and is intentionally not claimed as live.
+
+## Secret abilities (duel)
+
+Each player is dealt one of four hidden abilities with two charges for the match:
+Gravity Surge, Control Flip, Sidewind, Chomper Shrink. You see your own ability
+during the 3-2-1 countdown; your rival sees only that a mystery exists. Trigger
+with Z (P1) / X (P2) or the on-screen button. Abilities are short, visible once
+active, non-stacking, and never remove score or lives — they just make the next
+few seconds harder. A 6-second lockout prevents accidental double use.
+
+## The chomper
+
+The duel catcher is an original round "chomper" character with an animated wedge
+mouth and a glow in the player's chosen colour (not the basket image). Toggle it
+with `CONFIG.FEATURES.chomper`. Solo mode keeps the original basket.
 
 ## Players, history and leaderboard
 
